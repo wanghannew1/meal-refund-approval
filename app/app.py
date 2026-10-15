@@ -1,0 +1,438 @@
+"""
+Streamlit application for meal refund approval submission to Feishu.
+
+Provides a web UI for uploading Excel files, parsing meal refund data,
+looking up submitters by phone number, and submitting approval instances.
+"""
+
+import os
+import sys
+import tempfile
+import traceback
+import uuid
+from pathlib import Path
+
+import streamlit as st
+from dotenv import load_dotenv
+
+# Add project root to path for imports
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_PROJECT_ROOT))
+
+# Load .env from project root
+_env_path = _PROJECT_ROOT / ".env"
+if _env_path.exists():
+    load_dotenv(_env_path)
+
+# Import core modules (implemented by parallel agent)
+from app.excel_parser import parse_meal_refund_excel, MealRefundSheet
+from app.form_builder import build_form_widgets, APPROVAL_CODE
+from app.feishu_api import (
+    get_tenant_token,
+    lookup_user_by_mobile,
+    upload_approval_file,
+    get_approval_info,
+    preview_instance,
+    create_instance,
+    get_instance_detail,
+)
+
+# ---------------------------------------------------------------------------
+# Page config
+# ---------------------------------------------------------------------------
+st.set_page_config(
+    page_title="返餐费审批提交工具",
+    layout="wide",
+)
+
+# ---------------------------------------------------------------------------
+# Session state initialization
+# ---------------------------------------------------------------------------
+if "sheet" not in st.session_state:
+    st.session_state.sheet = None
+if "submitter" not in st.session_state:
+    st.session_state.submitter = None
+if "title" not in st.session_state:
+    st.session_state.title = ""
+if "remark" not in st.session_state:
+    st.session_state.remark = ""
+if "last_instance" not in st.session_state:
+    st.session_state.last_instance = None
+if "submitted" not in st.session_state:
+    st.session_state.submitted = False
+if "tmp_file_path" not in st.session_state:
+    st.session_state.tmp_file_path = None
+
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
+
+def _get_token() -> str:
+    """Get tenant access token from environment variables."""
+    app_id = os.getenv("FEISHU_APP_ID", "")
+    app_secret = os.getenv("FEISHU_APP_SECRET", "")
+    if not app_id or not app_secret:
+        return ""
+    try:
+        return get_tenant_token(app_id, app_secret)
+    except Exception:
+        return ""
+
+
+@st.cache_data(ttl=600)
+def _get_approval_name_cached(approval_code: str) -> str:
+    """Fetch approval name with caching."""
+    token = _get_token()
+    if not token:
+        return ""
+    try:
+        info = get_approval_info(token, approval_code)
+        return info.get("approval_name", "")
+    except Exception:
+        return ""
+
+
+def _cleanup_tmp_file():
+    """Clean up temporary file if it exists."""
+    tmp_path = st.session_state.get("tmp_file_path")
+    if tmp_path and Path(tmp_path).exists():
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+    st.session_state.tmp_file_path = None
+
+
+def _render_error_with_traceback(error_msg: str, error_obj: Exception = None):
+    """Render error message with optional traceback in expander."""
+    st.error(error_msg)
+    if error_obj:
+        with st.expander("技术详情"):
+            st.code(traceback.format_exc())
+
+
+# ---------------------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------------------
+def render_sidebar():
+    """Render sidebar with tool info and environment status."""
+    with st.sidebar:
+        st.header("返餐费审批提交工具")
+        st.divider()
+
+        # Approval info
+        approval_code = os.getenv("FEISHU_APPROVAL_CODE", APPROVAL_CODE)
+        st.markdown(f"**审批定义：**")
+        st.code(approval_code, language=None)
+
+        approval_name = _get_approval_name_cached(approval_code)
+        if approval_name:
+            st.success(f"审批名称：{approval_name}")
+        else:
+            app_id = os.getenv("FEISHU_APP_ID", "")
+            app_secret = os.getenv("FEISHU_APP_SECRET", "")
+            if not app_id or not app_secret:
+                st.warning("未配置飞书应用凭证")
+            else:
+                st.warning("无法获取审批名称（请检查凭证或网络）")
+
+        st.divider()
+
+        # Environment check
+        st.markdown("**环境检查：**")
+        app_id = os.getenv("FEISHU_APP_ID", "")
+        app_secret = os.getenv("FEISHU_APP_SECRET", "")
+
+        if app_id and app_secret:
+            st.success("✓ 飞书应用凭证已配置")
+        else:
+            st.error("✗ 缺少 FEISHU_APP_ID 或 FEISHU_APP_SECRET")
+
+        st.divider()
+        st.caption("制表人上传 Excel → 自动解析 → 提交飞书审批")
+
+
+# ---------------------------------------------------------------------------
+# Step 1: Upload Excel
+# ---------------------------------------------------------------------------
+def render_step1_upload():
+    """Render Step 1: Upload and parse Excel file."""
+    st.subheader("步骤 1：上传表格")
+
+    uploaded_file = st.file_uploader(
+        "选择退返餐费明细表（.xls / .xlsx）",
+        type=["xls", "xlsx"],
+    )
+
+    if uploaded_file is not None:
+        # Clean up previous temp file
+        _cleanup_tmp_file()
+
+        # Save to temp file
+        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix)
+        tmp_file.write(uploaded_file.getvalue())
+        tmp_file.close()
+        st.session_state.tmp_file_path = tmp_file.name
+
+        # Parse the file
+        try:
+            sheet = parse_meal_refund_excel(tmp_file.name)
+            st.session_state.sheet = sheet
+            st.session_state.title = sheet.title
+            st.session_state.submitted = False  # Reset submitted flag
+            st.success(f"解析成功：共 {len(sheet.rows)} 行数据")
+        except ValueError as e:
+            st.session_state.sheet = None
+            _render_error_with_traceback(f"解析失败：{e}", e)
+        except Exception as e:
+            st.session_state.sheet = None
+            _render_error_with_traceback(f"解析失败：{e}", e)
+
+
+# ---------------------------------------------------------------------------
+# Step 2: Preview data
+# ---------------------------------------------------------------------------
+def render_step2_preview():
+    """Render Step 2: Preview parsed data and lookup submitter."""
+    st.subheader("步骤 2：预览数据")
+
+    sheet = st.session_state.sheet
+    if sheet is None:
+        st.info("请先上传表格")
+        return
+
+    # Editable title
+    title = st.text_input("审批标题", value=st.session_state.title)
+    st.session_state.title = title
+
+    st.divider()
+
+    # Data preview
+    st.markdown("**明细数据：**")
+
+    # Build dataframe
+    data = []
+    for row in sheet.rows:
+        data.append({
+            "序号": row.serial,
+            "姓名": row.name,
+            "身份证号码": row.id_card,
+            "金额": row.amount,
+        })
+
+    if data:
+        st.dataframe(data, use_container_width=True, hide_index=True)
+
+    # Total line
+    st.markdown(f"**合计金额：** {sheet.total_amount}（{sheet.total_chinese}）")
+    st.markdown(f"**数据行数：** {len(sheet.rows)}")
+
+    # Warnings
+    if sheet.warnings:
+        for warning in sheet.warnings:
+            st.warning(warning)
+
+    st.divider()
+
+    # Submitter lookup
+    st.markdown("**审批发起人：**")
+
+    col_phone, col_btn = st.columns([3, 1])
+    with col_phone:
+        mobile = st.text_input("手机号（审批发起人）", placeholder="请输入手机号")
+    with col_btn:
+        lookup_clicked = st.button("查询发起人", use_container_width=True)
+
+    if lookup_clicked:
+        if not mobile.strip():
+            st.warning("请输入手机号")
+        else:
+            token = _get_token()
+            if not token:
+                st.error("无法获取访问令牌，请检查飞书应用凭证配置")
+            else:
+                try:
+                    user_info = lookup_user_by_mobile(token, mobile.strip())
+                    st.session_state.submitter = user_info
+                    st.success(f"已匹配发起人：{user_info['user_id']}")
+                except LookupError:
+                    st.session_state.submitter = None
+                    st.error("未找到该手机号对应的员工")
+                except RuntimeError as e:
+                    st.session_state.submitter = None
+                    error_msg = str(e)
+                    st.error(error_msg)
+                    # If message contains URL, render as link
+                    if "https://" in error_msg:
+                        # Extract URL from message
+                        import re
+                        urls = re.findall(r'https://[^\s]+', error_msg)
+                        if urls:
+                            st.markdown(f"授权链接：[点击打开]({urls[0]})")
+
+    # Show current submitter
+    if st.session_state.submitter:
+        submitter = st.session_state.submitter
+        st.info(f"当前发起人：{submitter['user_id']}（{submitter['mobile']}）")
+
+
+# ---------------------------------------------------------------------------
+# Step 3: Remark
+# ---------------------------------------------------------------------------
+def render_step3_remark():
+    """Render Step 3: Optional remark."""
+    st.subheader("步骤 3：备注")
+
+    sheet = st.session_state.sheet
+    default_remark = f"制表：{sheet.maker}" if sheet and sheet.maker else ""
+
+    remark = st.text_area("备注（可选）", value=st.session_state.remark or default_remark)
+    st.session_state.remark = remark
+
+
+# ---------------------------------------------------------------------------
+# Step 4: Actions
+# ---------------------------------------------------------------------------
+def render_step4_actions():
+    """Render Step 4: Preview and submit actions."""
+    st.subheader("步骤 4：操作")
+
+    sheet = st.session_state.sheet
+    submitter = st.session_state.submitter
+
+    if sheet is None or submitter is None:
+        st.warning("请先上传表格并查询发起人")
+        return
+
+    col_preview, col_submit = st.columns(2)
+
+    # Preview button
+    with col_preview:
+        if st.button("预览审批流程", use_container_width=True):
+            token = _get_token()
+            if not token:
+                st.error("无法获取访问令牌")
+            else:
+                try:
+                    # Build form with dummy file code for preview
+                    form_widgets = build_form_widgets(
+                        sheet,
+                        file_code="DRYRUN",
+                        title=st.session_state.title,
+                        remark=st.session_state.remark,
+                    )
+                    preview = preview_instance(
+                        token,
+                        APPROVAL_CODE,
+                        submitter["user_id"],
+                        form_widgets,
+                    )
+                    nodes = preview.get("nodes", [])
+                    if nodes:
+                        st.markdown("**审批流程：**")
+                        node_data = []
+                        for node in nodes:
+                            node_data.append({
+                                "节点名称": node.get("node_name", ""),
+                                "审批人": ", ".join(node.get("user_id_list", [])),
+                            })
+                        st.dataframe(node_data, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("未获取到审批节点信息")
+                except Exception as e:
+                    _render_error_with_traceback(f"预览失败：{e}", e)
+
+    # Submit button
+    with col_submit:
+        submit_clicked = st.button(
+            "提交审批",
+            type="primary",
+            use_container_width=True,
+            disabled=st.session_state.submitted,
+        )
+
+        if submit_clicked:
+            if st.session_state.submitted:
+                st.warning("已提交，请勿重复提交")
+                return
+
+            token = _get_token()
+            if not token:
+                st.error("无法获取访问令牌")
+                return
+
+            tmp_path = st.session_state.tmp_file_path
+            if not tmp_path or not Path(tmp_path).exists():
+                st.error("临时文件不存在，请重新上传")
+                return
+
+            try:
+                with st.spinner("正在上传并提交..."):
+                    # Upload file
+                    file_code = upload_approval_file(token, tmp_path)
+
+                    # Build form widgets
+                    form_widgets = build_form_widgets(
+                        sheet,
+                        file_code=file_code,
+                        title=st.session_state.title,
+                        remark=st.session_state.remark,
+                    )
+
+                    # Create instance
+                    instance_code = create_instance(
+                        token,
+                        APPROVAL_CODE,
+                        submitter["user_id"],
+                        form_widgets,
+                        uuid=str(uuid.uuid4()),
+                    )
+
+                    st.session_state.submitted = True
+                    st.session_state.last_instance = instance_code
+
+                st.success("提交成功！")
+                st.markdown(f"**实例编号：** `{instance_code}`")
+
+                # Try to get instance URL
+                try:
+                    detail = get_instance_detail(token, instance_code)
+                    instance_url = detail.get("instance_url", "")
+                    if instance_url:
+                        st.markdown(f"[查看审批详情]({instance_url})")
+                except Exception:
+                    # Failure to fetch URL is not critical
+                    pass
+
+            except RuntimeError as e:
+                _render_error_with_traceback(f"提交失败：{e}", e)
+            except Exception as e:
+                _render_error_with_traceback(f"提交失败：{e}", e)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+def main():
+    """Main entry point."""
+    render_sidebar()
+
+    st.title("返餐费审批提交工具")
+    st.markdown("上传退返餐费明细表，自动解析并提交飞书审批流程。")
+
+    st.divider()
+
+    render_step1_upload()
+    st.divider()
+
+    render_step2_preview()
+    st.divider()
+
+    render_step3_remark()
+    st.divider()
+
+    render_step4_actions()
+
+
+if __name__ == "__main__":
+    main()

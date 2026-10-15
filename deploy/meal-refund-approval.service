@@ -1,0 +1,44 @@
+# =============================================================================
+# systemd service unit for 返餐费审批提交工具 (Meal Refund Approval)
+#
+# 安装步骤：
+#   1. sudo cp deploy/meal-refund-approval.service /etc/systemd/system/
+#   2. 根据实际情况修改下方 User= 和路径（默认 /opt/meal-refund-approval）
+#   3. sudo systemctl daemon-reload
+#   4. sudo systemctl enable --now meal-refund-approval
+#
+# 常用命令：
+#   sudo systemctl status meal-refund-approval
+#   sudo systemctl restart meal-refund-approval
+#   journalctl -u meal-refund-approval -f
+# =============================================================================
+
+[Unit]
+Description=返餐费审批提交工具 (Meal Refund Approval - Streamlit)
+After=network.target
+
+[Service]
+Type=simple
+# 修改为实际部署用户（如 ubuntu、deploy 等）
+User=www-data
+Group=www-data
+
+WorkingDirectory=/opt/meal-refund-approval
+ExecStart=/opt/meal-refund-approval/.venv/bin/python -m streamlit run app/app.py \
+    --server.port 8501 \
+    --server.address 0.0.0.0 \
+    --server.headless true
+
+# 崩溃后 5 秒自动重启
+Restart=always
+RestartSec=5
+
+# 让 Python 输出不被缓冲，方便 journalctl 查看日志
+Environment=PYTHONUNBUFFERED=1
+
+# 日志输出到标准输出（由 journald 收集）
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+[project]
+name = "meal-refund-approval"
+version = "0.1.0"
+description = "退返餐费表上传提交飞书审批工具"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.28.0",
+    "python-dotenv>=1.0.0",
+    "streamlit>=1.33",
+    "xlrd>=2.0.1",
+    "openpyxl>=3.1.0",
+]
+
+[tool.uv]
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
