@@ -138,8 +138,8 @@ FEISHU_APP_SECRET=your_actual_secret_here
 FEISHU_APPROVAL_CODE=081B5624-B8B7-4334-AF42-D1075F8E650A
 ```
 
-> **首次运行前**：确保已在飞书开放平台开通 `contact:user.id:readonly` 权限（用于通过手机号查询用户 ID）。  
-> 授权页面：[https://open.feishu.cn/app/cli_aabb96a4a9b99bee/auth?q=contact:user.id:readonly&op_from=openapi&token_type=tenant](https://open.feishu.cn/app/cli_aabb96a4a9b99bee/auth?q=contact:user.id:readonly&op_from=openapi&token_type=tenant)  
+> **首次运行前**：确保已在飞书开放平台开通手机号查询权限（`contact:user.id:readonly` 或 `contact:user.employee_id:readonly`，具体以 API 错误提示为准）。  
+> 可选：开通 `contact:contact.base:readonly` 以显示用户姓名（未开通时降级显示 open_id）。  
 > 开通后需创建新版本并发布，等待几分钟生效。详见 [常见问题 #1](#1-查询发起人失败99991672-错误)。
 
 ### 4. 部署验证
@@ -397,7 +397,7 @@ sudo systemctl restart meal-refund-approval
 
 **问题：99991672 权限错误**
 
-参见 [常见问题 #1](#1-查询发起人失败99991672-错误)，确保已在飞书开放平台开通 `contact:user.id:readonly` 权限并发布新版本。
+参见 [常见问题 #1](#1-查询发起人失败99991672-错误)，确保已在飞书开放平台开通所需权限并发布新版本，然后删除 `.token_cache.json` 重试。
 
 **问题：systemd 服务无法启动**
 
@@ -430,13 +430,6 @@ journalctl -u meal-refund-approval -n 50
 - **合计金额**：显示数字和中文大写
 - **警告信息**：如有数据异常会显示警告
 
-**查询发起人：**
-
-输入审批发起人的手机号，点击"查询发起人"按钮。系统会通过飞书 API 查找对应的员工信息。
-
-- 成功：显示匹配的用户 ID
-- 失败：提示未找到或权限不足
-
 ### 步骤 3：备注
 
 填写可选的备注信息，默认为"制表：{制表人姓名}"。
@@ -450,27 +443,50 @@ journalctl -u meal-refund-approval -n 50
 - 实例编号
 - 审批详情链接（可点击跳转）
 
+## 手机号登录
+
+首次使用时，页面顶部会显示"手机号登录"区域：
+
+1. 输入审批发起人的手机号（11 位或 +86 前缀）
+2. 点击"登录"按钮
+3. 系统通过飞书 API 查找对应的 open_id，并尝试获取姓名
+4. 登录成功后显示"欢迎，{姓名}"（若姓名获取失败则降级显示 open_id）
+5. 点击"退出登录"可清除登录状态
+
+登录状态保存在浏览器 session 中，刷新页面后需重新登录。
+
 ## 常见问题
 
 ### 1. 查询发起人失败：99991672 错误
 
 **错误信息：**
 ```
-权限不足，需要 contact:user.id:readonly 权限
+权限不足，需要 [scope_name] 权限。请到飞书开放平台开通: ...
 ```
+
+**说明：**
+
+手机号登录需要以下权限（具体需要哪个由 API 错误信息中的 scope 列表决定，不同租户可能不同）：
+
+- **手机号查询**：`contact:user.id:readonly` 或 `contact:user.employee_id:readonly`（二选一，API 错误信息会明确告知需要哪个）
+- **姓名显示**（可选）：`contact:contact.base:readonly`（若未开通，系统会降级显示 open_id 而非姓名，不影响功能）
 
 **解决方法：**
 
-1. 打开飞书开放平台授权页面：
-   [https://open.feishu.cn/app/cli_aabb96a4a9b99bee/auth?q=contact:user.id:readonly&op_from=openapi&token_type=tenant](https://open.feishu.cn/app/cli_aabb96a4a9b99bee/auth?q=contact:user.id:readonly&op_from=openapi&token_type=tenant)
+1. 查看错误信息中的 scope 列表和对应的授权链接（可直接点击）
 
-2. 勾选 `contact:user.id:readonly` 权限
+2. 在飞书开放平台开通所需权限
 
-3. 点击"批量开通"
+3. **重要**：创建新版本并发布（权限变更后需要发布新版本才生效）
 
-4. **重要**：创建新版本并发布（权限变更后需要发布新版本才生效）
+4. 删除 `.token_cache.json` 文件（缓存的 token 可能不包含新权限）
 
-5. 等待几分钟后重试
+5. 重新登录重试
+
+**示例授权链接：**
+- [contact:user.id:readonly](https://open.feishu.cn/app/cli_aabb96a4a9b99bee/auth?q=contact:user.id:readonly&op_from=openapi&token_type=tenant)
+- [contact:user.employee_id:readonly](https://open.feishu.cn/app/cli_aabb96a4a9b99bee/auth?q=contact:user.employee_id:readonly&op_from=openapi&token_type=tenant)
+- [contact:contact.base:readonly](https://open.feishu.cn/app/cli_aabb96a4a9b99bee/auth?q=contact:contact.base:readonly&op_from=openapi&token_type=tenant)
 
 ### 2. Excel 模板格式说明
 
@@ -534,7 +550,8 @@ Excel 数据会映射到飞书审批表单的以下字段：
 | 接口 | 用途 |
 |------|------|
 | `POST /auth/v3/tenant_access_token/internal/` | 获取访问令牌 |
-| `GET /contact/v3/users/batch_get_id` | 通过手机号查询用户 ID |
+| `POST /contact/v3/users/batch_get_id` | 通过手机号查询用户 open_id |
+| `GET /contact/v3/users/{user_id}` | 获取用户姓名（可选，降级显示 open_id） |
 | `POST /drive/v1/medias/upload_all` | 上传附件文件 |
 | `GET /approval/v4/approvals/{code}` | 获取审批定义信息 |
 | `POST /approval/v4/instances/preview` | 预览审批流程 |

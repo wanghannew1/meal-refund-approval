@@ -30,6 +30,7 @@ from app.form_builder import build_form_widgets, APPROVAL_CODE
 from app.feishu_api import (
     get_tenant_token,
     lookup_user_by_mobile,
+    get_user_name,
     upload_approval_file,
     get_approval_info,
     preview_instance,
@@ -50,8 +51,12 @@ st.set_page_config(
 # ---------------------------------------------------------------------------
 if "sheet" not in st.session_state:
     st.session_state.sheet = None
-if "submitter" not in st.session_state:
-    st.session_state.submitter = None
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+if "open_id" not in st.session_state:
+    st.session_state.open_id = ""
+if "user_name" not in st.session_state:
+    st.session_state.user_name = ""
 if "title" not in st.session_state:
     st.session_state.title = ""
 if "remark" not in st.session_state:
@@ -109,6 +114,67 @@ def _render_error_with_traceback(error_msg: str, error_obj: Exception = None):
     if error_obj:
         with st.expander("技术详情"):
             st.code(traceback.format_exc())
+
+
+# ---------------------------------------------------------------------------
+# Login gate
+# ---------------------------------------------------------------------------
+def render_login_gate() -> bool:
+    """Render the phone-number login gate.
+
+    Returns True if the user is logged in (session has open_id).
+    If not logged in, renders the login form and returns False.
+    The caller should stop rendering the rest of the page.
+    """
+    if st.session_state.logged_in:
+        # Logged-in view: welcome + logout
+        col_welcome, col_logout = st.columns([4, 1])
+        with col_welcome:
+            st.subheader(f"欢迎，{st.session_state.user_name}")
+        with col_logout:
+            if st.button("退出登录"):
+                st.session_state.logged_in = False
+                st.session_state.open_id = ""
+                st.session_state.user_name = ""
+                st.rerun()
+        return True
+
+    # Not logged in: show login form
+    st.subheader("手机号登录")
+    mobile = st.text_input("手机号", placeholder="请输入手机号")
+    if st.button("登录"):
+        if not mobile.strip():
+            st.error("请输入手机号")
+        else:
+            token = _get_token()
+            if not token:
+                st.error("无法获取访问令牌，请检查飞书应用凭证配置")
+            else:
+                try:
+                    user_info = lookup_user_by_mobile(token, mobile.strip())
+                    open_id = user_info["open_id"]
+                    # Best-effort name lookup
+                    name = get_user_name(token, open_id)
+                    display_name = name or open_id
+                    st.session_state.logged_in = True
+                    st.session_state.open_id = open_id
+                    st.session_state.user_name = display_name
+                    st.success(f"登录成功：{display_name}")
+                    st.rerun()
+                except LookupError:
+                    st.error("手机号未找到对应用户")
+                except RuntimeError as e:
+                    error_msg = str(e)
+                    st.error(error_msg)
+                    # Render grant URLs as clickable links
+                    if "https://" in error_msg:
+                        import re
+                        urls = re.findall(r'https://[^\s\)）]+', error_msg)
+                        if urls:
+                            link_md = "  ".join(f"[开通链接]({u})" for u in urls)
+                            st.markdown(link_md)
+                    _render_error_with_traceback(error_msg, e)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -234,47 +300,6 @@ def render_step2_preview():
 
     st.divider()
 
-    # Submitter lookup
-    st.markdown("**审批发起人：**")
-
-    col_phone, col_btn = st.columns([3, 1])
-    with col_phone:
-        mobile = st.text_input("手机号（审批发起人）", placeholder="请输入手机号")
-    with col_btn:
-        lookup_clicked = st.button("查询发起人", use_container_width=True)
-
-    if lookup_clicked:
-        if not mobile.strip():
-            st.warning("请输入手机号")
-        else:
-            token = _get_token()
-            if not token:
-                st.error("无法获取访问令牌，请检查飞书应用凭证配置")
-            else:
-                try:
-                    user_info = lookup_user_by_mobile(token, mobile.strip())
-                    st.session_state.submitter = user_info
-                    st.success(f"已匹配发起人：{user_info['user_id']}")
-                except LookupError:
-                    st.session_state.submitter = None
-                    st.error("未找到该手机号对应的员工")
-                except RuntimeError as e:
-                    st.session_state.submitter = None
-                    error_msg = str(e)
-                    st.error(error_msg)
-                    # If message contains URL, render as link
-                    if "https://" in error_msg:
-                        # Extract URL from message
-                        import re
-                        urls = re.findall(r'https://[^\s]+', error_msg)
-                        if urls:
-                            st.markdown(f"授权链接：[点击打开]({urls[0]})")
-
-    # Show current submitter
-    if st.session_state.submitter:
-        submitter = st.session_state.submitter
-        st.info(f"当前发起人：{submitter['user_id']}（{submitter['mobile']}）")
-
 
 # ---------------------------------------------------------------------------
 # Step 3: Remark
@@ -298,10 +323,9 @@ def render_step4_actions():
     st.subheader("步骤 4：操作")
 
     sheet = st.session_state.sheet
-    submitter = st.session_state.submitter
 
-    if sheet is None or submitter is None:
-        st.warning("请先上传表格并查询发起人")
+    if sheet is None:
+        st.warning("请先上传表格")
         return
 
     col_preview, col_submit = st.columns(2)
@@ -324,7 +348,7 @@ def render_step4_actions():
                     preview = preview_instance(
                         token,
                         APPROVAL_CODE,
-                        submitter["user_id"],
+                        st.session_state.open_id,
                         form_widgets,
                     )
                     nodes = preview.get("nodes", [])
@@ -383,7 +407,7 @@ def render_step4_actions():
                     instance_code = create_instance(
                         token,
                         APPROVAL_CODE,
-                        submitter["user_id"],
+                        st.session_state.open_id,
                         form_widgets,
                         uuid=str(uuid.uuid4()),
                     )
@@ -421,6 +445,10 @@ def main():
     st.markdown("上传退返餐费明细表，自动解析并提交飞书审批流程。")
 
     st.divider()
+
+    # Login gate — must pass before any other UI
+    if not render_login_gate():
+        return
 
     render_step1_upload()
     st.divider()
