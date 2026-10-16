@@ -7,8 +7,11 @@ from pathlib import Path
 import pytest
 
 from app.excel_parser import (
+    BonusRow,
+    BonusSheet,
     MealRefundRow,
     MealRefundSheet,
+    parse_bonus_excel,
     parse_meal_refund_excel,
 )
 
@@ -238,3 +241,583 @@ class TestEdgeCases:
         assert sheet.rows[0].name == "王五"
         assert sheet.total_amount == "1000"
         assert sheet.maker == "测试"
+
+
+def _build_bonus_workbook(
+    tmp_path: Path,
+    filename: str = "bonus.xlsx",
+    title: str = "科研部发放吉林大学2024年科研业绩津贴明细表（08.28）",
+    data_rows: list[tuple] | None = None,
+    bonus_total: float = 96000.0,
+    tax_total: float = 19504.0,
+    net_total: float = 76496.0,
+    maker_text: str = "制表人：张朦",
+    skip_totals: bool = False,
+    skip_maker: bool = False,
+    skip_header: bool = False,
+) -> Path:
+    """Build a synthetic bonus workbook mirroring the real template layout."""
+    import openpyxl
+
+    if data_rows is None:
+        data_rows = [
+            (1.0, 824282.0, "张三", "110101199001011234", 80000.0, 15000.0, 65000.0),
+            (2.0, 824283.0, "李四", "110101199002022345", 16000.0, 4504.0, 11496.0),
+        ]
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["A1"] = title
+
+    if not skip_header:
+        ws["A2"] = "序号"
+        ws["B2"] = "工号"
+        ws["C2"] = "姓名"
+        ws["D2"] = "身份证号"
+        ws["E2"] = "奖金（单位：元）"
+        ws["F2"] = "应纳个人所得税"
+        ws["G2"] = "实发金额"
+
+    row_idx = 3
+    for dr in data_rows:
+        for col_idx, val in enumerate(dr, start=1):
+            ws.cell(row=row_idx, column=col_idx, value=val)
+        row_idx += 1
+
+    if not skip_totals:
+        ws.cell(row=row_idx, column=1, value="合计")
+        ws.cell(row=row_idx, column=5, value=bonus_total)
+        ws.cell(row=row_idx, column=6, value=tax_total)
+        ws.cell(row=row_idx, column=7, value=net_total)
+        totals_idx = row_idx
+        row_idx += 1
+
+    if not skip_maker and not skip_totals:
+        ws.cell(row=totals_idx + 1, column=7, value=maker_text)
+
+    filepath = tmp_path / filename
+    wb.save(filepath)
+    return filepath
+
+
+class TestBonusFixture:
+    """Test suite for bonus spreadsheet parsing with synthetic fixtures."""
+
+    def test_parse_title(self, tmp_path: Path):
+        """Test title extraction from row 0 col 0."""
+        fp = _build_bonus_workbook(tmp_path)
+        sheet = parse_bonus_excel(fp)
+        assert sheet.title == "科研部发放吉林大学2024年科研业绩津贴明细表（08.28）"
+
+    def test_parse_row_count(self, tmp_path: Path):
+        """Test that data rows are parsed correctly."""
+        fp = _build_bonus_workbook(tmp_path)
+        sheet = parse_bonus_excel(fp)
+        assert len(sheet.rows) == 2
+
+    def test_parse_first_row(self, tmp_path: Path):
+        """Test first data row values."""
+        fp = _build_bonus_workbook(tmp_path)
+        sheet = parse_bonus_excel(fp)
+        row = sheet.rows[0]
+        assert row.serial == "1"
+        assert row.employee_id == "824282"
+        assert row.name == "张三"
+        assert row.id_card == "110101199001011234"
+        assert row.bonus == "80000"
+        assert row.tax == "15000"
+        assert row.net_amount == "65000"
+
+    def test_parse_last_row(self, tmp_path: Path):
+        """Test last data row values."""
+        fp = _build_bonus_workbook(tmp_path)
+        sheet = parse_bonus_excel(fp)
+        row = sheet.rows[-1]
+        assert row.serial == "2"
+        assert row.employee_id == "824283"
+        assert row.name == "李四"
+
+    def test_float_employee_id_normalized(self, tmp_path: Path):
+        """Test that float employee IDs are normalized to int strings."""
+        fp = _build_bonus_workbook(tmp_path)
+        sheet = parse_bonus_excel(fp)
+        assert sheet.rows[0].employee_id == "824282"
+        assert "." not in sheet.rows[0].employee_id
+
+    def test_text_employee_id_zero_padding_preserved(self, tmp_path: Path):
+        """Test that text employee IDs preserve zero-padding."""
+        fp = _build_bonus_workbook(
+            tmp_path,
+            data_rows=[
+                (1.0, "001234", "张三", "110101199001011234", 80000.0, 15000.0, 65000.0),
+            ],
+            bonus_total=80000.0,
+            tax_total=15000.0,
+            net_total=65000.0,
+        )
+        sheet = parse_bonus_excel(fp)
+        assert sheet.rows[0].employee_id == "001234"
+
+    def test_id_card_with_x_preserved(self, tmp_path: Path):
+        """Test that ID cards ending in X are preserved."""
+        fp = _build_bonus_workbook(
+            tmp_path,
+            data_rows=[
+                (1.0, 824282.0, "张三", "22010519830911161X", 80000.0, 15000.0, 65000.0),
+            ],
+            bonus_total=80000.0,
+            tax_total=15000.0,
+            net_total=65000.0,
+        )
+        sheet = parse_bonus_excel(fp)
+        assert sheet.rows[0].id_card == "22010519830911161X"
+
+    def test_totals_extraction(self, tmp_path: Path):
+        """Test totals extraction from 合计 row."""
+        fp = _build_bonus_workbook(tmp_path)
+        sheet = parse_bonus_excel(fp)
+        assert sheet.bonus_total == "96000"
+        assert sheet.tax_total == "19504"
+        assert sheet.net_total == "76496"
+
+    def test_maker_extraction_from_col6(self, tmp_path: Path):
+        """Test maker extraction from col6 (制表人：张朦)."""
+        fp = _build_bonus_workbook(tmp_path)
+        sheet = parse_bonus_excel(fp)
+        assert sheet.maker == "张朦"
+
+    def test_maker_with_short_form(self, tmp_path: Path):
+        """Test maker extraction with '制表：' (no 人)."""
+        fp = _build_bonus_workbook(tmp_path, maker_text="制表：王五")
+        sheet = parse_bonus_excel(fp)
+        assert sheet.maker == "王五"
+
+    def test_blank_row_skipping(self, tmp_path: Path):
+        """Test that blank rows between data and totals are skipped."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Title"
+        ws["A2"] = "序号"
+        ws["B2"] = "工号"
+        ws["C2"] = "姓名"
+        ws["D2"] = "身份证号"
+        ws["E2"] = "奖金"
+        ws["F2"] = "个税"
+        ws["G2"] = "实发"
+        ws["A3"] = 1.0
+        ws["B3"] = 824282.0
+        ws["C3"] = "张三"
+        ws["D3"] = "110101199001011234"
+        ws["E3"] = 50000.0
+        ws["F3"] = 10000.0
+        ws["G3"] = 40000.0
+        # Blank row 4
+        ws["A5"] = "合计"
+        ws["E5"] = 50000.0
+        ws["F5"] = 10000.0
+        ws["G5"] = 40000.0
+        ws["G6"] = "制表人：测试"
+        fp = tmp_path / "blank_rows.xlsx"
+        wb.save(fp)
+
+        sheet = parse_bonus_excel(fp)
+        assert len(sheet.rows) == 1
+        assert sheet.rows[0].name == "张三"
+
+    def test_no_header_raises(self, tmp_path: Path):
+        """Test that missing header row raises ValueError."""
+        fp = _build_bonus_workbook(tmp_path, skip_header=True)
+        with pytest.raises(ValueError, match="未找到表头行"):
+            parse_bonus_excel(fp)
+
+    def test_no_data_rows_raises(self, tmp_path: Path):
+        """Test that no data rows raises ValueError."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Title"
+        ws["A2"] = "序号"
+        ws["B2"] = "工号"
+        ws["C2"] = "姓名"
+        ws["D2"] = "身份证号"
+        ws["E2"] = "奖金"
+        ws["F2"] = "个税"
+        ws["G2"] = "实发"
+        ws["A3"] = "合计"
+        ws["E3"] = 0
+        ws["F3"] = 0
+        ws["G3"] = 0
+        fp = tmp_path / "no_data.xlsx"
+        wb.save(fp)
+
+        with pytest.raises(ValueError, match="未找到数据行"):
+            parse_bonus_excel(fp)
+
+    def test_totals_mismatch_warning(self, tmp_path: Path):
+        """Test that sum != total produces a warning."""
+        fp = _build_bonus_workbook(
+            tmp_path,
+            data_rows=[
+                (1.0, 824282.0, "张三", "110101199001011234", 80000.0, 15000.0, 65000.0),
+                (2.0, 824283.0, "李四", "110101199002022345", 16000.0, 4504.0, 11496.0),
+            ],
+            bonus_total=99999.0,
+            tax_total=19504.0,
+            net_total=76496.0,
+        )
+        sheet = parse_bonus_excel(fp)
+        bonus_warnings = [w for w in sheet.warnings if "奖金明细合计" in w]
+        assert len(bonus_warnings) == 1
+        assert "不一致" in bonus_warnings[0]
+
+    def test_per_row_bonus_tax_net_warning(self, tmp_path: Path):
+        """Test per-row warning when bonus - tax != net_amount."""
+        fp = _build_bonus_workbook(
+            tmp_path,
+            data_rows=[
+                (1.0, 824282.0, "张三", "110101199001011234", 80000.0, 15000.0, 99999.0),
+            ],
+            bonus_total=80000.0,
+            tax_total=15000.0,
+            net_total=99999.0,
+        )
+        sheet = parse_bonus_excel(fp)
+        row_warnings = [w for w in sheet.warnings if "实发金额 与 奖金-个人所得税 不一致" in w]
+        assert len(row_warnings) == 1
+        assert "第1行" in row_warnings[0]
+
+    def test_unsupported_format_raises(self, tmp_path: Path):
+        """Test that unsupported file format raises ValueError."""
+        filepath = tmp_path / "test.csv"
+        filepath.write_text("a,b,c")
+        with pytest.raises(ValueError, match="不支持的文件格式"):
+            parse_bonus_excel(filepath)
+
+
+class TestBonusAdjustmentColumn:
+    """Test suite for the optional 个人其他调整 (adjustment) column."""
+
+    def test_adjustment_column_absent(self, tmp_path: Path):
+        """When adjustment column is absent, all rows have adjustment='0'."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Title"
+        ws["A2"] = "序号"
+        ws["B2"] = "工号"
+        ws["C2"] = "姓名"
+        ws["D2"] = "身份证号"
+        ws["E2"] = "奖金"
+        ws["F2"] = "应纳个人所得税"
+        ws["G2"] = "实发金额"
+        ws["A3"] = 1.0
+        ws["B3"] = 824282.0
+        ws["C3"] = "张三"
+        ws["D3"] = "110101199001011234"
+        ws["E3"] = 50000.0
+        ws["F3"] = 10000.0
+        ws["G3"] = 40000.0
+        ws["A4"] = "合计"
+        ws["E4"] = 50000.0
+        ws["F4"] = 10000.0
+        ws["G4"] = 40000.0
+        ws["G5"] = "制表人：测试"
+        fp = tmp_path / "no_adj.xlsx"
+        wb.save(fp)
+
+        sheet = parse_bonus_excel(fp)
+        assert len(sheet.rows) == 1
+        assert sheet.rows[0].adjustment == "0"
+        assert sheet.adjustment_total == "0"
+        adj_warnings = [w for w in sheet.warnings if "个人其他调整" in w]
+        assert len(adj_warnings) == 0
+
+    def test_adjustment_column_at_end(self, tmp_path: Path):
+        """When adjustment column is at the end, values are parsed."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Title"
+        ws["A2"] = "序号"
+        ws["B2"] = "工号"
+        ws["C2"] = "姓名"
+        ws["D2"] = "身份证号"
+        ws["E2"] = "奖金"
+        ws["F2"] = "应纳个人所得税"
+        ws["G2"] = "实发金额"
+        ws["H2"] = "个人其他调整"
+        ws["A3"] = 1.0
+        ws["B3"] = 824282.0
+        ws["C3"] = "张三"
+        ws["D3"] = "110101199001011234"
+        ws["E3"] = 50000.0
+        ws["F3"] = 10000.0
+        ws["G3"] = 40000.0
+        ws["H3"] = 500.0
+        ws["A4"] = "合计"
+        ws["E4"] = 50000.0
+        ws["F4"] = 10000.0
+        ws["G4"] = 40000.0
+        ws["H4"] = 500.0
+        ws["H5"] = "制表人：测试"
+        fp = tmp_path / "adj_end.xlsx"
+        wb.save(fp)
+
+        sheet = parse_bonus_excel(fp)
+        assert sheet.rows[0].adjustment == "500"
+        assert sheet.adjustment_total == "500"
+
+    def test_adjustment_column_between_tax_and_net(self, tmp_path: Path):
+        """When adjustment is between tax and net, all fields parse correctly."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Title"
+        ws["A2"] = "序号"
+        ws["B2"] = "工号"
+        ws["C2"] = "姓名"
+        ws["D2"] = "身份证号"
+        ws["E2"] = "奖金"
+        ws["F2"] = "应纳个人所得税"
+        ws["G2"] = "个人其他调整"
+        ws["H2"] = "实发金额"
+        ws["A3"] = 1.0
+        ws["B3"] = 824282.0
+        ws["C3"] = "张三"
+        ws["D3"] = "110101199001011234"
+        ws["E3"] = 50000.0
+        ws["F3"] = 10000.0
+        ws["G3"] = 500.0
+        ws["H3"] = 39500.0
+        ws["A4"] = "合计"
+        ws["E4"] = 50000.0
+        ws["F4"] = 10000.0
+        ws["G4"] = 500.0
+        ws["H4"] = 39500.0
+        ws["H5"] = "制表人：测试"
+        fp = tmp_path / "adj_mid.xlsx"
+        wb.save(fp)
+
+        sheet = parse_bonus_excel(fp)
+        row = sheet.rows[0]
+        assert row.bonus == "50000"
+        assert row.tax == "10000"
+        assert row.adjustment == "500"
+        assert row.net_amount == "39500"
+        assert sheet.adjustment_total == "500"
+
+    def test_adjustment_blank_cell_becomes_zero(self, tmp_path: Path):
+        """Blank adjustment cell becomes '0'."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Title"
+        ws["A2"] = "序号"
+        ws["B2"] = "工号"
+        ws["C2"] = "姓名"
+        ws["D2"] = "身份证号"
+        ws["E2"] = "奖金"
+        ws["F2"] = "应纳个人所得税"
+        ws["G2"] = "个人其他调整"
+        ws["H2"] = "实发金额"
+        ws["A3"] = 1.0
+        ws["B3"] = 824282.0
+        ws["C3"] = "张三"
+        ws["D3"] = "110101199001011234"
+        ws["E3"] = 50000.0
+        ws["F3"] = 10000.0
+        ws["G3"] = None
+        ws["H3"] = 40000.0
+        ws["A4"] = "合计"
+        ws["E4"] = 50000.0
+        ws["F4"] = 10000.0
+        ws["G4"] = 0.0
+        ws["H4"] = 40000.0
+        ws["H5"] = "制表人：测试"
+        fp = tmp_path / "adj_blank.xlsx"
+        wb.save(fp)
+
+        sheet = parse_bonus_excel(fp)
+        assert sheet.rows[0].adjustment == "0"
+
+    def test_blank_money_and_input_cells_do_not_leak_none(self, tmp_path: Path):
+        """Blank money cells become '0'; blank input cells become '' (never 'None')."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Title"
+        ws["A2"] = "序号"
+        ws["B2"] = "工号"
+        ws["C2"] = "姓名"
+        ws["D2"] = "身份证号"
+        ws["E2"] = "奖金"
+        ws["F2"] = "应纳个人所得税"
+        ws["G2"] = "实发金额"
+        ws["C3"] = "张三"
+        ws["A4"] = "合计"
+        ws["H5"] = "制表人：测试"
+        fp = tmp_path / "blank_cells.xlsx"
+        wb.save(fp)
+
+        row = parse_bonus_excel(fp).rows[0]
+        assert row.bonus == "0"
+        assert row.tax == "0"
+        assert row.net_amount == "0"
+        assert row.adjustment == "0"
+        assert row.serial == ""
+        assert row.employee_id == ""
+        assert row.id_card == ""
+        assert "None" not in (row.bonus, row.tax, row.net_amount, row.serial, row.employee_id, row.id_card)
+
+    def test_adjustment_negative_value(self, tmp_path: Path):
+        """Negative adjustment value is preserved."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Title"
+        ws["A2"] = "序号"
+        ws["B2"] = "工号"
+        ws["C2"] = "姓名"
+        ws["D2"] = "身份证号"
+        ws["E2"] = "奖金"
+        ws["F2"] = "应纳个人所得税"
+        ws["G2"] = "个人其他调整"
+        ws["H2"] = "实发金额"
+        ws["A3"] = 1.0
+        ws["B3"] = 824282.0
+        ws["C3"] = "张三"
+        ws["D3"] = "110101199001011234"
+        ws["E3"] = 50000.0
+        ws["F3"] = 10000.0
+        ws["G3"] = -500.0
+        ws["H3"] = 40500.0
+        ws["A4"] = "合计"
+        ws["E4"] = 50000.0
+        ws["F4"] = 10000.0
+        ws["G4"] = -500.0
+        ws["H4"] = 40500.0
+        ws["H5"] = "制表人：测试"
+        fp = tmp_path / "adj_neg.xlsx"
+        wb.save(fp)
+
+        sheet = parse_bonus_excel(fp)
+        assert sheet.rows[0].adjustment == "-500"
+
+    def test_adjustment_total_mismatch_warning(self, tmp_path: Path):
+        """Adjustment sum mismatch produces a warning."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Title"
+        ws["A2"] = "序号"
+        ws["B2"] = "工号"
+        ws["C2"] = "姓名"
+        ws["D2"] = "身份证号"
+        ws["E2"] = "奖金"
+        ws["F2"] = "应纳个人所得税"
+        ws["G2"] = "个人其他调整"
+        ws["H2"] = "实发金额"
+        ws["A3"] = 1.0
+        ws["B3"] = 824282.0
+        ws["C3"] = "张三"
+        ws["D3"] = "110101199001011234"
+        ws["E3"] = 50000.0
+        ws["F3"] = 10000.0
+        ws["G3"] = 500.0
+        ws["H3"] = 39500.0
+        ws["A4"] = "合计"
+        ws["E4"] = 50000.0
+        ws["F4"] = 10000.0
+        ws["G4"] = 9999.0
+        ws["H4"] = 39500.0
+        ws["H5"] = "制表人：测试"
+        fp = tmp_path / "adj_mismatch.xlsx"
+        wb.save(fp)
+
+        sheet = parse_bonus_excel(fp)
+        adj_warnings = [w for w in sheet.warnings if "个人其他调整明细合计" in w]
+        assert len(adj_warnings) == 1
+        assert "不一致" in adj_warnings[0]
+
+    def test_per_row_net_check_skipped_with_nonzero_adjustment(self, tmp_path: Path):
+        """Per-row net check is skipped when adjustment is non-zero."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Title"
+        ws["A2"] = "序号"
+        ws["B2"] = "工号"
+        ws["C2"] = "姓名"
+        ws["D2"] = "身份证号"
+        ws["E2"] = "奖金"
+        ws["F2"] = "应纳个人所得税"
+        ws["G2"] = "个人其他调整"
+        ws["H2"] = "实发金额"
+        ws["A3"] = 1.0
+        ws["B3"] = 824282.0
+        ws["C3"] = "张三"
+        ws["D3"] = "110101199001011234"
+        ws["E3"] = 50000.0
+        ws["F3"] = 10000.0
+        ws["G3"] = 500.0
+        ws["H3"] = 99999.0
+        ws["A4"] = "合计"
+        ws["E4"] = 50000.0
+        ws["F4"] = 10000.0
+        ws["G4"] = 500.0
+        ws["H4"] = 99999.0
+        ws["H5"] = "制表人：测试"
+        fp = tmp_path / "adj_skip_check.xlsx"
+        wb.save(fp)
+
+        sheet = parse_bonus_excel(fp)
+        net_warnings = [w for w in sheet.warnings if "实发金额 与 奖金-个人所得税 不一致" in w]
+        assert len(net_warnings) == 0
+
+    def test_per_row_net_check_active_with_zero_adjustment(self, tmp_path: Path):
+        """Per-row net check is active when adjustment is zero."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Title"
+        ws["A2"] = "序号"
+        ws["B2"] = "工号"
+        ws["C2"] = "姓名"
+        ws["D2"] = "身份证号"
+        ws["E2"] = "奖金"
+        ws["F2"] = "应纳个人所得税"
+        ws["G2"] = "个人其他调整"
+        ws["H2"] = "实发金额"
+        ws["A3"] = 1.0
+        ws["B3"] = 824282.0
+        ws["C3"] = "张三"
+        ws["D3"] = "110101199001011234"
+        ws["E3"] = 50000.0
+        ws["F3"] = 10000.0
+        ws["G3"] = 0.0
+        ws["H3"] = 99999.0
+        ws["A4"] = "合计"
+        ws["E4"] = 50000.0
+        ws["F4"] = 10000.0
+        ws["G4"] = 0.0
+        ws["H4"] = 99999.0
+        ws["H5"] = "制表人：测试"
+        fp = tmp_path / "adj_zero_check.xlsx"
+        wb.save(fp)
+
+        sheet = parse_bonus_excel(fp)
+        net_warnings = [w for w in sheet.warnings if "实发金额 与 奖金-个人所得税 不一致" in w]
+        assert len(net_warnings) == 1
+        assert "第1行" in net_warnings[0]
