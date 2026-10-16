@@ -821,3 +821,140 @@ class TestBonusAdjustmentColumn:
         net_warnings = [w for w in sheet.warnings if "实发金额 与 奖金-个人所得税 不一致" in w]
         assert len(net_warnings) == 1
         assert "第1行" in net_warnings[0]
+
+
+def _write_union_fee_workbook(
+    path: Path,
+    total_amount: int = 45,
+    include_total_row: bool = True,
+    include_signature_row: bool = True,
+) -> None:
+    """Write a 5-column 工会会费 sheet shaped like the real template.
+
+    Layout mirrors the real file (title, 单位行, header, 3 data rows,
+    合计 row, 说明 row, blank row, signature row). The 合计 column at
+    index 4 duplicates the 金额 value and must be ignored by the parser.
+    """
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["A1"] = "XX单位2026年06月派遣员工工会会费转入彩虹公司工会账户明细（06.03）"
+    ws["E2"] = "单位：元"
+    ws["A3"] = "序号"
+    ws["B3"] = "姓名"
+    ws["C3"] = "身份证号"
+    ws["D3"] = "金额"
+    ws["E3"] = "合计"
+    ws["A4"] = 1
+    ws["B4"] = "陈一"
+    ws["C4"] = "110101197001011234"
+    ws["D4"] = 15
+    ws["E4"] = 15
+    ws["A5"] = 2
+    ws["B5"] = "陈二"
+    ws["C5"] = "11010119710202234X"
+    ws["D5"] = 15
+    ws["E5"] = 15
+    ws["A6"] = 3
+    ws["B6"] = "陈三"
+    ws["C6"] = "110101197203033456"
+    ws["D6"] = 15
+    ws["E6"] = 15
+    if include_total_row:
+        ws["A7"] = "合计"
+        ws["D7"] = total_amount
+        ws["E7"] = total_amount
+    ws["A8"] = "说明：现申请将该单位工会会费转入彩虹公司工会账户。"
+    # row 9 intentionally blank
+    if include_signature_row:
+        ws["A10"] = "总经理签字："
+        ws["B10"] = "部长签字："
+        ws["D10"] = "财务审核："
+        ws["E10"] = "制表：郑文琦"
+    wb.save(path)
+
+
+class TestUnionFeeSheet:
+    """Test suite for the 5-column 工会会费 (union fee) spreadsheet format."""
+
+    def test_union_fee_total_row_detected(self, tmp_path: Path):
+        """Total row detected via col0=='合计'; maker from col index 4."""
+        fp = tmp_path / "union_fee.xlsx"
+        _write_union_fee_workbook(fp)
+        sheet = parse_meal_refund_excel(fp)
+        assert sheet.total_amount == "45"
+        assert sheet.total_chinese == ""
+        assert sheet.maker == "郑文琦"
+
+    def test_union_fee_rows_and_extra_column_ignored(self, tmp_path: Path):
+        """Exactly 3 data rows; amount from col3, not the 合计 col4."""
+        fp = tmp_path / "union_fee.xlsx"
+        _write_union_fee_workbook(fp)
+        sheet = parse_meal_refund_excel(fp)
+        assert len(sheet.rows) == 3
+        row0 = sheet.rows[0]
+        assert row0 == MealRefundRow(
+            serial="1",
+            name="陈一",
+            id_card="110101197001011234",
+            amount="15",
+        )
+        assert sheet.rows[2].amount == "15"
+
+    def test_union_fee_no_bogus_signature_rows(self, tmp_path: Path):
+        """Signature/说明 rows must not leak into the parsed data."""
+        fp = tmp_path / "union_fee.xlsx"
+        _write_union_fee_workbook(fp)
+        sheet = parse_meal_refund_excel(fp)
+        assert len(sheet.rows) == 3
+        assert not any("签字" in r.serial for r in sheet.rows)
+        assert not any(r.name == "部长签字：" for r in sheet.rows)
+
+    def test_union_fee_sum_mismatch_warns(self, tmp_path: Path):
+        """合计 total != sum(rows) produces exactly one '不一致' warning."""
+        fp = tmp_path / "union_fee_mismatch.xlsx"
+        _write_union_fee_workbook(fp, total_amount=99)
+        sheet = parse_meal_refund_excel(fp)
+        mismatch_warnings = [w for w in sheet.warnings if "不一致" in w]
+        assert len(mismatch_warnings) == 1
+
+    def test_meal_total_row_still_works(self, tmp_path: Path):
+        """Regression guard: 4-column 返餐费 format with col0=='总计' still parses."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Test Meal"
+        ws["A2"] = "序号"
+        ws["B2"] = "姓名"
+        ws["C2"] = "身份证号码"
+        ws["D2"] = "金额"
+        ws["A3"] = 1
+        ws["B3"] = "张三"
+        ws["C3"] = "110101199001011234"
+        ws["D3"] = 60
+        ws["A4"] = 2
+        ws["B4"] = "李四"
+        ws["C4"] = "110101199002022345"
+        ws["D4"] = 60
+        ws["A5"] = "总计"
+        ws["B5"] = "（人民币大写）壹佰贰拾元"
+        ws["D5"] = "￥：120"
+        ws["A7"] = "制表：测试"
+        fp = tmp_path / "meal.xlsx"
+        wb.save(fp)
+
+        sheet = parse_meal_refund_excel(fp)
+        assert sheet.total_amount == "120"
+        assert sheet.total_chinese == "（人民币大写）壹佰贰拾元"
+        assert len(sheet.rows) == 2
+
+    def test_signature_guard_stops_without_total_row(self, tmp_path: Path):
+        """Signature row stops parsing even when no total row exists."""
+        fp = tmp_path / "no_total.xlsx"
+        _write_union_fee_workbook(fp, include_total_row=False)
+        sheet = parse_meal_refund_excel(fp)
+        assert len(sheet.rows) == 3
+        assert sheet.total_amount == ""
+        assert not any("签字" in r.serial for r in sheet.rows)

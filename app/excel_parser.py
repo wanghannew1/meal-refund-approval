@@ -247,7 +247,16 @@ def parse_meal_refund_excel(path: str | Path) -> MealRefundSheet:
 
     Supports .xls (xlrd) and .xlsx (openpyxl) formats.  The header row
     is located by finding col0=="序号" AND col1=="姓名".  Data rows
-    follow until a 总计 row (col0=="总计") or a blank row.
+    follow until a total row or a blank row.
+
+    Two total-row labels are recognized:
+      - 返餐费 (meal refund) format: col0=="总计" (4 columns)
+      - 工会会费 (union fee) format: col0=="合计" (5 columns, with an
+        extra 合计 column at index 4 that is ignored)
+
+    The maker ("制表：...") is searched in subsequent rows after the
+    total row, scanning all columns of each row (so a signature row
+    that places "制表" in column index 4 is still found).
 
     Args:
         path: Path to the Excel file.
@@ -300,24 +309,36 @@ def parse_meal_refund_excel(path: str | Path) -> MealRefundSheet:
 
         col0_raw = row[0]
 
-        # Check for 总计 row
+        # Check for 总计 (返餐费) or 合计 (工会会费) total row
         col0_str = str(col0_raw).strip() if col0_raw is not None else ""
-        if col0_str == "总计":
-            # Extract total info
+        if col0_str in ("总计", "合计"):
+            # Extract total info.
+            # total_chinese comes from row[1]; may be empty for 工会会费
+            # (that is valid — leave it as "").
             total_chinese = str(row[1]).strip() if row[1] is not None else ""
             raw_total = str(row[3]).strip() if row[3] is not None else ""
             total_amount = _extract_total_amount(raw_total)
+            # row[4] (the 工会会费 extra 合计 column) is intentionally ignored.
 
-            # Look for maker in subsequent rows
-            for subsequent_idx in range(idx + 1, min(idx + 5, len(all_rows))):
+            # Look for maker in subsequent rows. Scan ALL columns of each
+            # row (not just the first 4) so "制表：..." in column index 4
+            # of a 工会会费 signature row is still found. Widen the window
+            # from 5 to 8 rows to cover sheets with 说明 + blank + signature.
+            for subsequent_idx in range(idx + 1, min(idx + 8, len(all_rows))):
                 sub_row = all_rows[subsequent_idx]
-                for cell_idx in range(min(len(sub_row), 4)):
+                for cell_idx in range(len(sub_row)):
                     cell_text = str(sub_row[cell_idx]).strip() if sub_row[cell_idx] is not None else ""
                     if "制表" in cell_text:
                         maker = _extract_maker(cell_text)
                         break
                 if maker:
                     break
+            break
+
+        # Defensive end-of-data guard: signature rows like "总经理签字："
+        # must never be parsed as data rows (e.g. when a sheet's total row
+        # is missing or mislabeled). Stop parsing as soon as we see one.
+        if "签字" in col0_str:
             break
 
         # Check for blank row
