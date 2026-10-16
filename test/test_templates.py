@@ -30,15 +30,17 @@ MAKER = "张三"
 TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 MEAL_PATH = TEMPLATES_DIR / "返餐费明细表模板.xlsx"
 BONUS_PATH = TEMPLATES_DIR / "科研业绩津贴明细表模板.xlsx"
+UNF_PATH = TEMPLATES_DIR / "工会会费明细表模板.xlsx"
 
 
 class TestShippedTemplates:
     """Guards for the two sanitized template files shipped in-repo."""
 
     def test_templates_exist(self):
-        """Both template files must exist under templates/."""
+        """All template files must exist under templates/."""
         assert MEAL_PATH.exists(), f"Missing: {MEAL_PATH}"
         assert BONUS_PATH.exists(), f"Missing: {BONUS_PATH}"
+        assert UNF_PATH.exists(), f"Missing: {UNF_PATH}"
 
     # ── Meal template ───────────────────────────────────────────────
 
@@ -118,3 +120,43 @@ class TestShippedTemplates:
         assert len(detail_rows) == 4
         for row in detail_rows:
             assert len(row) == 7
+
+    # ── Union fee (工会会费) template ────────────────────────────────
+
+    def test_unf_parses_cleanly(self):
+        """Union fee template parses with expected structure and zero warnings."""
+        sheet = parse_meal_refund_excel(UNF_PATH)
+        assert sheet.title == "XX单位2026年06月派遣员工工会会费转入彩虹公司工会账户明细（06.03）"
+        assert len(sheet.rows) == 5
+        assert sheet.rows[0].name == "李四"
+        assert sheet.rows[0].id_card == "110101197001011234"
+        assert sheet.rows[0].amount == "15"
+        assert sheet.rows[4].name == "周八"
+        assert sheet.total_amount == "75"
+        assert sheet.total_chinese == ""
+        assert sheet.maker == "张三"
+        assert sheet.warnings == []
+
+    def test_sanitization_unf_names_and_ids(self):
+        """Every UNF row name is in the fake pool; every ID matches fake pattern."""
+        sheet = parse_meal_refund_excel(UNF_PATH)
+        for row in sheet.rows:
+            assert row.name in FAKE_NAME_SET, f"Real name leaked: {row.name}"
+            assert FAKE_ID_PATTERN.match(row.id_card), (
+                f"Real ID leaked: {row.id_card}"
+            )
+        assert sheet.maker == "张三"
+
+    def test_form_builder_accepts_unf_template(self):
+        """Form builder succeeds on the union fee template."""
+        sheet = parse_meal_refund_excel(UNF_PATH)
+        widgets = build_form_widgets(sheet, file_code="fake_code")
+        assert isinstance(widgets, list)
+        assert len(widgets) >= 1
+        # The detail-list widget contains 5 rows × 4 fields each
+        detail_widget = [w for w in widgets if w.get("type") == "fieldList"]
+        assert len(detail_widget) == 1
+        detail_rows = detail_widget[0]["value"]
+        assert len(detail_rows) == 5
+        for row in detail_rows:
+            assert len(row) == 4
