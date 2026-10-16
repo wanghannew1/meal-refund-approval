@@ -228,7 +228,7 @@ def render_login_gate() -> bool:
 def render_sidebar():
     """Render sidebar with tool info and environment status."""
     kind = st.session_state.approval_kind
-    kind_label = "返餐费审批" if kind == "meal" else "奖金发放审批"
+    kind_label = "派遣员工简易费用明细表审批" if kind == "meal" else "奖金发放审批"
     tool_title = f"{kind_label}提交工具"
 
     with st.sidebar:
@@ -282,10 +282,11 @@ def render_step1_upload():
 
     with st.expander("模板下载", expanded=False):
         st.markdown("**模板下载（可直接填写后上传）：**")
-        col_meal, col_bonus = st.columns(2)
+        col_meal, col_unf, col_bonus = st.columns(3)
 
         templates = [
             (col_meal, "返餐费明细表模板.xlsx"),
+            (col_unf, "工会会费明细表模板.xlsx"),
             (col_bonus, "科研业绩津贴明细表模板.xlsx"),
         ]
         for col, filename in templates:
@@ -304,14 +305,18 @@ def render_step1_upload():
                     st.warning(f"模板文件缺失：{filename}")
 
         st.caption("模板已脱敏（不含真实个人信息）；请保留表头与合计行结构后填写。")
+        st.caption("返餐费末行写『总计』，工会会费末行写『合计』；工会会费多出的合计列可忽略。")
 
     kind = st.session_state.approval_kind
     if kind == "bonus":
         label = "选择奖金明细表（.xls / .xlsx）"
     else:
-        label = "选择退返餐费明细表（.xls / .xlsx）"
+        label = "选择返餐费或工会会费明细表（.xls / .xlsx）"
 
     uploaded_file = st.file_uploader(label, type=["xls", "xlsx"])
+
+    if kind != "bonus":
+        st.caption("返餐费与工会会费共用此上传入口和审批流程：两种模板均自动识别（返餐费末行『总计』，工会会费末行『合计』；工会会费多出的合计列自动忽略）。")
 
     if uploaded_file is not None:
         # Clean up previous temp file
@@ -398,7 +403,10 @@ def render_step2_preview():
         st.markdown(f"**个人其他调整合计：** {sheet.adjustment_total}")
         st.markdown(f"**实发金额合计：** {sheet.net_total}")
     else:
-        st.markdown(f"**合计金额：** {sheet.total_amount}（{sheet.total_chinese}）")
+        if sheet.total_chinese:
+            st.markdown(f"**合计金额：** {sheet.total_amount}（{sheet.total_chinese}）")
+        else:
+            st.markdown(f"**合计金额：** {sheet.total_amount}")
     st.markdown(f"**数据行数：** {len(sheet.rows)}")
 
     # Warnings
@@ -560,8 +568,8 @@ def main():
         st.title("奖金发放审批提交工具")
         st.markdown("上传奖金明细表，自动解析并提交飞书审批流程。")
     else:
-        st.title("返餐费审批提交工具")
-        st.markdown("上传退返餐费明细表，自动解析并提交飞书审批流程。")
+        st.title("派遣员工简易费用明细表审批提交工具")
+        st.markdown("适用于手工制作的退返餐费、工会会费等简易费用表。表中除序号、姓名、身份证号外，仅设一列金额，表格末尾为合计金额。审批顺序：夏璠→张宇佳→蒿敬恪。")
 
     st.divider()
 
@@ -572,10 +580,10 @@ def main():
     # Approval type selector
     kind_label = st.radio(
         "审批类型",
-        ["返餐费审批", "奖金发放审批"],
+        ["派遣员工简易费用明细表审批", "奖金发放审批"],
         horizontal=True,
     )
-    new_kind = "meal" if kind_label == "返餐费审批" else "bonus"
+    new_kind = "meal" if kind_label == "派遣员工简易费用明细表审批" else "bonus"
     if new_kind != st.session_state.approval_kind:
         st.session_state.approval_kind = new_kind
         _reset_sheet_state()
