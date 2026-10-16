@@ -171,7 +171,7 @@ def render_login_gate() -> bool:
             st.subheader(f"欢迎，{st.session_state.user_name}")
             if st.session_state.name_lookup_failed:
                 st.caption(
-                    "提示：未能获取飞书姓名（可能缺少 contact:contact.base:readonly 权限），"
+                    "提示：未能获取飞书姓名（可能缺少 contact:user.basic_profile:readonly 权限），"
                     "已显示 open_id"
                 )
         with col_logout:

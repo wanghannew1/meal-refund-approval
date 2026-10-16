@@ -29,7 +29,7 @@ INSTANCES_URL = f"{BASE_URL}/approval/v4/instances"
 INSTANCE_DETAIL_URL = f"{BASE_URL}/approval/v4/instances/{{instance_code}}"
 PREVIEW_URL = f"{BASE_URL}/approval/v4/instances/preview"
 CONTACT_LOOKUP_URL = f"{BASE_URL}/contact/v3/users/batch_get_id"
-USER_INFO_URL = f"{BASE_URL}/contact/v3/users/{{user_id}}"
+USER_BASIC_BATCH_URL = f"{BASE_URL}/contact/v3/users/basic_batch"
 
 # ── Token cache ──────────────────────────────────────────────────────
 CACHE_FILE = Path(".token_cache.json")
@@ -311,9 +311,14 @@ def lookup_user_by_mobile(
 def get_user_name(token: str, open_id: str) -> str | None:
     """Look up a user's display name by open_id.
 
-    Calls GET /contact/v3/users/{open_id}?user_id_type=open_id.
-    This is a best-effort lookup: any failure (scope error, 404,
-    network error) returns None rather than raising, so the UI
+    Calls POST /contact/v3/users/basic_batch (获取用户基础信息), which
+    only requires the contact:user.basic_profile:readonly scope.  The
+    previous GET /contact/v3/users/{open_id} endpoint needs broader
+    contact scopes and still returns name=None without field-level
+    grants.
+
+    This is a best-effort lookup: any failure (scope error, empty
+    result, network error) returns None rather than raising, so the UI
     can fall back to displaying the open_id.
 
     Args:
@@ -324,11 +329,13 @@ def get_user_name(token: str, open_id: str) -> str | None:
         The user's display name string, or None on any failure.
     """
     headers = get_auth_headers(token)
-    url = USER_INFO_URL.format(user_id=open_id)
     params = {"user_id_type": "open_id"}
+    body = {"user_ids": [open_id]}
 
     try:
-        resp = requests.get(url, headers=headers, params=params)
+        resp = requests.post(
+            USER_BASIC_BATCH_URL, headers=headers, params=params, json=body
+        )
         data = resp.json()
     except Exception:
         logger.warning("get_user_name: network/parse error for open_id=%s", open_id)
@@ -351,7 +358,12 @@ def get_user_name(token: str, open_id: str) -> str | None:
         )
         return None
 
-    name = data.get("data", {}).get("user", {}).get("name")
+    users = data.get("data", {}).get("users") or []
+    if not users:
+        logger.warning("get_user_name: empty users list for open_id=%s", open_id)
+        return None
+
+    name = users[0].get("name")
     return name or None
 
 

@@ -18,7 +18,7 @@ from app.feishu_api import (
     INSTANCES_URL,
     PREVIEW_URL,
     TOKEN_URL,
-    USER_INFO_URL,
+    USER_BASIC_BATCH_URL,
     create_instance,
     get_approval_info,
     get_auth_headers,
@@ -265,7 +265,7 @@ class TestLookupUserByMobile:
 
 
 class TestGetUserName:
-    """Test suite for get_user_name."""
+    """Test suite for get_user_name (basic_batch endpoint)."""
 
     def test_get_user_name_success(self, mock_token: str):
         """Test successful name lookup returns the name."""
@@ -273,15 +273,16 @@ class TestGetUserName:
         mock_response.json.return_value = {
             "code": 0,
             "msg": "success",
-            "data": {"user": {"name": "张三"}},
+            "data": {"users": [{"name": "张三"}]},
         }
-        with patch("app.feishu_api.requests.get", return_value=mock_response) as mock_get:
+        with patch("app.feishu_api.requests.post", return_value=mock_response) as mock_post:
             result = get_user_name(mock_token, "ou_abc123")
             assert result == "张三"
-            mock_get.assert_called_once()
-            call_args = mock_get.call_args
-            assert "ou_abc123" in call_args.args[0]
+            mock_post.assert_called_once()
+            call_args = mock_post.call_args
+            assert call_args.args[0] == USER_BASIC_BATCH_URL
             assert call_args.kwargs["params"] == {"user_id_type": "open_id"}
+            assert call_args.kwargs["json"] == {"user_ids": ["ou_abc123"]}
 
     def test_get_user_name_scope_error(self, mock_token: str):
         """Test scope error returns None (graceful fallback)."""
@@ -289,9 +290,9 @@ class TestGetUserName:
         mock_response.json.return_value = {
             "code": 99991672,
             "msg": "Access denied. One of the following scopes is required: "
-            "[contact:contact.base:readonly]",
+            "[contact:user.basic_profile:readonly]",
         }
-        with patch("app.feishu_api.requests.get", return_value=mock_response):
+        with patch("app.feishu_api.requests.post", return_value=mock_response):
             result = get_user_name(mock_token, "ou_abc123")
             assert result is None
 
@@ -301,9 +302,21 @@ class TestGetUserName:
         mock_response.json.return_value = {
             "code": 0,
             "msg": "success",
-            "data": {"user": {"name": ""}},
+            "data": {"users": [{"name": ""}]},
         }
-        with patch("app.feishu_api.requests.get", return_value=mock_response):
+        with patch("app.feishu_api.requests.post", return_value=mock_response):
+            result = get_user_name(mock_token, "ou_abc123")
+            assert result is None
+
+    def test_get_user_name_empty_users(self, mock_token: str):
+        """Test empty users list returns None."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "code": 0,
+            "msg": "success",
+            "data": {"users": []},
+        }
+        with patch("app.feishu_api.requests.post", return_value=mock_response):
             result = get_user_name(mock_token, "ou_abc123")
             assert result is None
 
@@ -314,13 +327,13 @@ class TestGetUserName:
             "code": 9999,
             "msg": "not found",
         }
-        with patch("app.feishu_api.requests.get", return_value=mock_response):
+        with patch("app.feishu_api.requests.post", return_value=mock_response):
             result = get_user_name(mock_token, "ou_abc123")
             assert result is None
 
     def test_get_user_name_network_error(self, mock_token: str):
         """Test network error returns None."""
-        with patch("app.feishu_api.requests.get", side_effect=Exception("network error")):
+        with patch("app.feishu_api.requests.post", side_effect=Exception("network error")):
             result = get_user_name(mock_token, "ou_abc123")
             assert result is None
 
