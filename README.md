@@ -15,6 +15,7 @@ MealRefundApproval/
 ├── test/                       # 测试代码
 ├── deploy/                     # 部署配置
 │   └── meal-refund-approval.service  # systemd 服务单元示例
+├── templates/                  # 脱敏模板（可下载、可入库；不含真实个人信息）
 ├── start.bat                   # Windows 启动脚本
 ├── start.sh                    # Linux 启动脚本（服务器部署）
 ├── requirements.txt            # Python 依赖
@@ -155,6 +156,8 @@ cd /opt/meal-refund-approval
 ```
 
 > **提示**：测试模板 `test/fixtures/返餐费2026.xls` 含真实姓名/身份证号，不随仓库分发。完整 67 个测试需自行将模板放入该路径；缺失时相关用例自动跳过，不会报错。
+
+> **注意**：`templates/` 目录下的模板已脱敏（姓名/身份证号/工号均为示例假数据），可随仓库分发、供用户下载；`test/fixtures/` 下的测试数据含真实个人信息，已 gitignore，两者请勿混淆。
 
 ### 5. 启动方式一：start.sh 快速启动（适合试用/内网）
 
@@ -426,6 +429,8 @@ journalctl -u meal-refund-approval -n 50
 
 #### 步骤 1：上传表格
 
+页面提供"模板下载"按钮（位于上传区上方的可折叠面板），可下载返餐费明细表模板 / 科研业绩津贴明细表模板（.xlsx），填写后上传；模板已脱敏（姓名/身份证号/工号均为示例假数据，不含真实个人信息）。
+
 点击"选择退返餐费明细表"按钮，上传 `.xls` 或 `.xlsx` 格式的 Excel 文件。
 
 系统会自动解析表格内容，包括：
@@ -457,6 +462,8 @@ journalctl -u meal-refund-approval -n 50
 ### 奖金发放审批流程
 
 #### 步骤 1：上传表格
+
+页面提供"模板下载"按钮，可下载对应模板（.xlsx），填写后上传；模板已脱敏，不含真实个人信息。
 
 点击"选择奖金明细表"按钮，上传 `.xls` 或 `.xlsx` 格式的 Excel 文件。
 
