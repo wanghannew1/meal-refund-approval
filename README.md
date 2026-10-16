@@ -16,6 +16,7 @@ MealRefundApproval/
 ├── deploy/                     # 部署配置
 │   └── meal-refund-approval.service  # systemd 服务单元示例
 ├── templates/                  # 脱敏模板（可下载、可入库；不含真实个人信息）
+├── docs/                       # 问题排查记录与运维文档
 ├── start.bat                   # Windows 启动脚本
 ├── start.sh                    # Linux 启动脚本（服务器部署）
 ├── requirements.txt            # Python 依赖
@@ -555,7 +556,7 @@ journalctl -u meal-refund-approval -n 50
 手机号登录需要以下权限（具体需要哪个由 API 错误信息中的 scope 列表决定，不同租户可能不同）：
 
 - **手机号查询**：`contact:user.id:readonly` 或 `contact:user.employee_id:readonly`（二选一，API 错误信息会明确告知需要哪个）
-- **姓名显示**（可选）：`contact:contact.base:readonly`（若未开通，系统会降级显示 open_id 而非姓名，不影响功能）
+- **姓名显示**（可选）：`contact:user.basic_profile:readonly`（若未开通，系统会降级显示 open_id 而非姓名，不影响功能）
 
 **解决方法：**
 
@@ -572,7 +573,7 @@ journalctl -u meal-refund-approval -n 50
 **示例授权链接：**
 - [contact:user.id:readonly](https://open.feishu.cn/app/cli_aabb96a4a9b99bee/auth?q=contact:user.id:readonly&op_from=openapi&token_type=tenant)
 - [contact:user.employee_id:readonly](https://open.feishu.cn/app/cli_aabb96a4a9b99bee/auth?q=contact:user.employee_id:readonly&op_from=openapi&token_type=tenant)
-- [contact:contact.base:readonly](https://open.feishu.cn/app/cli_aabb96a4a9b99bee/auth?q=contact:contact.base:readonly&op_from=openapi&token_type=tenant)
+- [contact:user.basic_profile:readonly](https://open.feishu.cn/app/cli_aabb96a4a9b99bee/auth?q=contact:user.basic_profile:readonly&op_from=openapi&token_type=tenant)
 
 ### 2. Excel 模板格式说明
 
@@ -666,7 +667,7 @@ Excel 数据会映射到飞书审批表单的以下字段：
 |------|------|
 | `POST /auth/v3/tenant_access_token/internal/` | 获取访问令牌 |
 | `POST /contact/v3/users/batch_get_id` | 通过手机号查询用户 open_id |
-| `GET /contact/v3/users/{user_id}` | 获取用户姓名（可选，降级显示 open_id） |
+| `POST /contact/v3/users/basic_batch` | 获取用户姓名（可选，降级显示 open_id） |
 | `POST /drive/v1/medias/upload_all` | 上传附件文件 |
 | `GET /approval/v4/approvals/{code}` | 获取审批定义信息 |
 | `POST /approval/v4/instances/preview` | 预览审批流程 |
