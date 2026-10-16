@@ -379,6 +379,46 @@ class TestUploadApprovalFile:
             with pytest.raises(RuntimeError, match="未返回文件 code"):
                 upload_approval_file(mock_token, test_file)
 
+    def test_upload_uses_override_filename(
+        self, mock_token: str, tmp_path: Path
+    ):
+        """Test override filename is used in both data and files parts."""
+        test_file = tmp_path / "tmpXXXX.xls"
+        test_file.write_bytes(b"fake excel content")
+
+        override_name = "科研部发放吉林大学2024年科研业绩津贴明细表.xls"
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "code": 0,
+            "data": {"code": "file_code_override"},
+        }
+        with patch("app.feishu_api.requests.post", return_value=mock_response) as mock_post:
+            result = upload_approval_file(mock_token, test_file, filename=override_name)
+            assert result == "file_code_override"
+            mock_post.assert_called_once()
+            call_kwargs = mock_post.call_args.kwargs
+            assert call_kwargs["data"] == {"name": override_name, "type": "attachment"}
+            assert call_kwargs["files"]["content"][0] == override_name
+
+    def test_upload_defaults_to_file_name(
+        self, mock_token: str, tmp_path: Path
+    ):
+        """Test default filename falls back to file_path.name."""
+        test_file = tmp_path / "test.xls"
+        test_file.write_bytes(b"fake excel content")
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "code": 0,
+            "data": {"code": "file_code_default"},
+        }
+        with patch("app.feishu_api.requests.post", return_value=mock_response) as mock_post:
+            result = upload_approval_file(mock_token, test_file)
+            assert result == "file_code_default"
+            call_kwargs = mock_post.call_args.kwargs
+            assert call_kwargs["data"] == {"name": "test.xls", "type": "attachment"}
+            assert call_kwargs["files"]["content"][0] == "test.xls"
+
 
 class TestGetApprovalInfo:
     """Test suite for get_approval_info."""

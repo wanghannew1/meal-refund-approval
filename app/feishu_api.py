@@ -355,7 +355,9 @@ def get_user_name(token: str, open_id: str) -> str | None:
     return name or None
 
 
-def upload_approval_file(token: str, file_path: str | Path) -> str:
+def upload_approval_file(
+    token: str, file_path: str | Path, filename: str | None = None
+) -> str:
     """Upload a file for use as an approval attachment.
 
     Uploads via the approval-specific file upload endpoint and
@@ -364,6 +366,9 @@ def upload_approval_file(token: str, file_path: str | Path) -> str:
     Args:
         token: Valid tenant access token.
         file_path: Path to the file to upload.
+        filename: Filename to record in Feishu as the attachment name.
+            Defaults to the file's own name; pass the original client
+            filename when the file was copied to a temp path.
 
     Returns:
         File code string (data.code from the API response).
@@ -375,24 +380,21 @@ def upload_approval_file(token: str, file_path: str | Path) -> str:
     if not file_path.exists():
         raise FileNotFoundError(f"文件不存在: {file_path}")
 
+    name = filename or file_path.name
+
     headers = get_auth_headers(token)
 
     with open(file_path, "rb") as f:
         file_content = f.read()
 
-    # Multipart form: name (filename), type, content
-    form_data = {
-        "name": (file_path.name, None),
-        "type": (None, "attachment"),
-    }
     files = {
-        "content": (file_path.name, file_content),
+        "content": (name, file_content),
     }
 
     resp = requests.post(
         APPROVAL_FILE_UPLOAD_URL,
         headers=headers,
-        data={"name": file_path.name, "type": "attachment"},
+        data={"name": name, "type": "attachment"},
         files=files,
     )
     data = resp.json()
