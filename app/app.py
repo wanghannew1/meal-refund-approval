@@ -272,8 +272,38 @@ def render_sidebar():
 # Step 1: Upload Excel
 # ---------------------------------------------------------------------------
 def render_step1_upload():
-    """Render Step 1: Upload and parse Excel file."""
+    """Render Step 1: Upload and parse Excel file.
+
+    Includes a template download section (two sanitized .xlsx templates)
+    above the file uploader, so users can grab a blank form directly from
+    the page instead of receiving it out-of-band.
+    """
     st.subheader("步骤 1：上传表格")
+
+    with st.expander("模板下载", expanded=False):
+        st.markdown("**模板下载（可直接填写后上传）：**")
+        col_meal, col_bonus = st.columns(2)
+
+        templates = [
+            (col_meal, "返餐费明细表模板.xlsx"),
+            (col_bonus, "科研业绩津贴明细表模板.xlsx"),
+        ]
+        for col, filename in templates:
+            template_path = _PROJECT_ROOT / "templates" / filename
+            with col:
+                if template_path.is_file():
+                    data = template_path.read_bytes()
+                    st.download_button(
+                        label=f"下载{filename.replace('.xlsx', '')}",
+                        data=data,
+                        file_name=filename,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                    )
+                else:
+                    st.warning(f"模板文件缺失：{filename}")
+
+        st.caption("模板已脱敏（不含真实个人信息）；请保留表头与合计行结构后填写。")
 
     kind = st.session_state.approval_kind
     if kind == "bonus":
