@@ -15,6 +15,7 @@ from app.excel_parser import (
     parse_meal_refund_excel,
     list_sheets,
     SheetInfo,
+    _xls_saved_selected_index,
 )
 
 
@@ -1052,6 +1053,8 @@ class TestMultiSheetWorkbooks:
         assert sheets[0].has_valid_header is True
         assert sheets[1].name == "Sheet2"
         assert sheets[1].has_valid_header is False
+        assert sheets[0].is_default is True
+        assert sheets[1].is_default is False
 
     def test_list_sheets_xls(self, tmp_path: Path):
         """list_sheets works for .xls files."""
@@ -1079,6 +1082,8 @@ class TestMultiSheetWorkbooks:
         assert sheets[0].has_valid_header is True
         assert sheets[1].name == "Sheet2"
         assert sheets[1].has_valid_header is False
+        assert sheets[0].is_default is False
+        assert sheets[1].is_default is True
 
     def test_xlsx_default_active_sheet(self, tmp_path: Path):
         """For .xlsx, default sheet is the active sheet."""
@@ -1202,6 +1207,175 @@ class TestMultiSheetWorkbooks:
         sheet = parse_meal_refund_excel(fp, sheet_index=1)
         assert sheet.title == "Title2"
         assert sheet.rows[0].name == "李四"
+
+
+class TestDefaultSheetSelection:
+    """SheetInfo.is_default must match the parser's no-argument default sheet.
+
+    Agreed rule: .xlsx -> the workbook's ACTIVE sheet (unconditional, even if
+    it lacks a valid header); .xls -> the LAST sheet.
+    """
+
+    @staticmethod
+    def _write_active_default_workbook(tmp_path: Path) -> Path:
+        """Two valid-header sheets; Sheet2 saved as the active tab (Sheet1 is the decoy)."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws1 = wb.active
+        ws1.title = "Sheet1"
+        ws1["A1"] = "Title1"
+        ws1["A2"] = "序号"
+        ws1["B2"] = "姓名"
+        ws1["C2"] = "金额"
+        ws1["A3"] = 1
+        ws1["B3"] = "不该选中"
+        ws1["C3"] = 100
+        ws1["A4"] = "总计"
+        ws1["C4"] = 100
+
+        ws2 = wb.create_sheet("Sheet2")
+        ws2["A1"] = "Title2"
+        ws2["A2"] = "序号"
+        ws2["B2"] = "姓名"
+        ws2["C2"] = "金额"
+        ws2["A3"] = 1
+        ws2["B3"] = "激活表数据"
+        ws2["C3"] = 200
+        ws2["A4"] = "总计"
+        ws2["C4"] = 200
+
+        wb.active = 1
+        fp = tmp_path / "active_default.xlsx"
+        wb.save(fp)
+        return fp
+
+    def test_xlsx_flags_active_sheet_and_parses_it_by_default(self, tmp_path: Path):
+        """list_sheets flags the active sheet; no-arg parse reads it, not sheet 0."""
+        fp = self._write_active_default_workbook(tmp_path)
+
+        infos = list_sheets(fp)
+        assert [s.name for s in infos if s.is_default] == ["Sheet2"]
+
+        sheet = parse_meal_refund_excel(fp)
+        assert sheet.rows[0].name == "激活表数据"
+
+        decoy = parse_meal_refund_excel(fp, sheet_name="Sheet1")
+        assert decoy.rows[0].name == "不该选中"
+
+    def test_default_flag_matches_parser_no_arg_rows(self, tmp_path: Path):
+        """Parsing by the flagged name yields the same rows as parsing with sheet_name=None."""
+        fp = self._write_active_default_workbook(tmp_path)
+
+        infos = list_sheets(fp)
+        default_name = next(s.name for s in infos if s.is_default)
+
+        by_name = parse_meal_refund_excel(fp, sheet_name=default_name)
+        by_default = parse_meal_refund_excel(fp)
+        assert by_name.rows == by_default.rows
+
+    def test_xls_flags_last_sheet(self, real_fixture_path: Path):
+        """The .xls last-sheet rule is flagged (single-sheet fixture -> its only sheet)."""
+        infos = list_sheets(real_fixture_path)
+        assert infos
+        assert [s.name for s in infos if s.is_default] == [infos[-1].name]
+
+
+class TestXlsSavedSelectedIndex:
+    """Test suite for _xls_saved_selected_index helper (WINDOW1 record reader)."""
+
+    def test_synthetic_window1_record(self, tmp_path: Path):
+        """Helper extracts itabCur from a synthetic WINDOW1 record."""
+        import struct
+
+        # Build a minimal byte blob with a valid WINDOW1 record:
+        # type 0x003D (little-endian: b'\x3d\x00'), length 0x0012 (b'\x12\x00'),
+        # then 18 bytes of data with itabCur at offset 10 set to 1.
+        header = b"\x3d\x00\x12\x00"
+        # 9 uint16 fields: xWn, yWn, dxWn, dyWn, grbit, itabCur, itabFirst, ctabSel, wTabRatio
+        # Set itabCur (field index 5) to 1, others to 0.
+        data = struct.pack("<HHHHHHHHH", 0, 0, 0, 0, 0, 1, 0, 0, 0)
+        blob = header + data
+        fp = tmp_path / "synthetic.xls"
+        fp.write_bytes(blob)
+
+        result = _xls_saved_selected_index(fp)
+        assert result == 1
+
+    def test_garbage_file_returns_none(self, tmp_path: Path):
+        """Helper returns None for a garbage file."""
+        fp = tmp_path / "garbage.xls"
+        fp.write_bytes(b"not an xls")
+
+        result = _xls_saved_selected_index(fp)
+        assert result is None
+
+    def test_fallback_when_helper_returns_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """When helper returns None, is_default lands on the last sheet."""
+        pytest.importorskip("xlwt")
+        import xlwt
+
+        wb_xls = xlwt.Workbook()
+        ws1_xls = wb_xls.add_sheet("Sheet1")
+        ws1_xls.write(0, 0, "序号")
+        ws1_xls.write(0, 1, "姓名")
+        ws1_xls.write(0, 2, "金额")
+        ws1_xls.write(1, 0, 1)
+        ws1_xls.write(1, 1, "张三")
+        ws1_xls.write(1, 2, 100)
+
+        ws2_xls = wb_xls.add_sheet("Sheet2")
+        ws2_xls.write(0, 0, "No header")
+
+        fp_xls = tmp_path / "fallback.xls"
+        wb_xls.save(fp_xls)
+
+        monkeypatch.setattr(
+            "app.excel_parser._xls_saved_selected_index",
+            lambda path: None
+        )
+
+        infos = list_sheets(fp_xls)
+        assert [s.name for s in infos if s.is_default] == ["Sheet2"]
+
+    def test_consistency_flagged_default_matches_parser(self, tmp_path: Path):
+        """For any multi-sheet fixture, the name flagged is_default by list_sheets
+        equals what a no-arg parse reads (extends TestDefaultSheetSelection pattern)."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws1 = wb.active
+        ws1.title = "Sheet1"
+        ws1["A1"] = "Title1"
+        ws1["A2"] = "序号"
+        ws1["B2"] = "姓名"
+        ws1["C2"] = "金额"
+        ws1["A3"] = 1
+        ws1["B3"] = "张三"
+        ws1["C3"] = 100
+        ws1["A4"] = "总计"
+        ws1["C4"] = 100
+
+        ws2 = wb.create_sheet("Sheet2")
+        ws2["A1"] = "Title2"
+        ws2["A2"] = "序号"
+        ws2["B2"] = "姓名"
+        ws2["C2"] = "金额"
+        ws2["A3"] = 1
+        ws2["B3"] = "李四"
+        ws2["C3"] = 200
+        ws2["A4"] = "总计"
+        ws2["C4"] = 200
+
+        wb.active = 1  # Sheet2 is active
+        fp = tmp_path / "consistency.xlsx"
+        wb.save(fp)
+
+        infos = list_sheets(fp)
+        default_name = next(s.name for s in infos if s.is_default)
+        by_default = parse_meal_refund_excel(fp)
+        by_name = parse_meal_refund_excel(fp, sheet_name=default_name)
+        assert by_name.rows == by_default.rows
 
 
 class TestDuplicateNames:
@@ -1369,7 +1543,11 @@ class TestRealFixtureThreeCol:
     """Test suite using the real 3-col fixture file."""
 
     def test_real_three_col_fixture(self):
-        """Test parsing the real 3-col fixture (博众返餐费.xlsx)."""
+        """Test parsing the real 3-col fixture (博众返餐费.xlsx), pinned to Sheet1.
+
+        Sheet1 is pinned because the workbook's active tab is user-controlled;
+        the no-arg default (active sheet) is covered by TestDefaultSheetSelection.
+        """
         from pathlib import Path
         from decimal import Decimal
 
@@ -1377,7 +1555,7 @@ class TestRealFixtureThreeCol:
         if not fixture_path.exists():
             pytest.skip("3-col fixture not available")
 
-        sheet = parse_meal_refund_excel(fixture_path)
+        sheet = parse_meal_refund_excel(fixture_path, sheet_name="Sheet1")
         assert len(sheet.rows) == 515
         assert sheet.rows[0].name == "李宏奇"
         assert Decimal(sheet.rows[0].amount) == Decimal("0.04")

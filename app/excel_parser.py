@@ -213,10 +213,14 @@ class SheetInfo:
         name: Sheet name.
         has_valid_header: True if the sheet contains a recognized meal-refund
             header row (序号 + 姓名 + 金额 columns).
+        is_default: True for the sheet the parser reads when no sheet is
+            given: .xlsx -> the workbook's ACTIVE sheet; .xls -> the LAST
+            sheet. Matches the read defaults in _read_xlsx/_read_xls.
     """
 
     name: str
     has_valid_header: bool
+    is_default: bool = False
 
 
 def _has_meal_header(rows: list[list[object]]) -> bool:
@@ -231,6 +235,75 @@ def _has_meal_header(rows: list[list[object]]) -> bool:
         if required.issubset(found):
             return True
     return False
+
+
+def _xls_saved_selected_index(path: str | Path) -> int | None:
+    """Return the 0-based index of the sheet that was selected when the .xls
+    file was saved (BIFF record WINDOW1, field itabCur), or None if it cannot
+    be determined.
+
+    The saved-selected tab is recoverable from the BIFF binary even though
+    xlrd exposes no API for it. WINDOW1 record layout (type 0x003D, data
+    length 0x12 = 18 bytes): 9 little-endian uint16 fields — xWn, yWn, dxWn,
+    dyWn, grbit, itabCur, itabFirst, ctabSel, wTabRatio. itabCur is at data
+    offset 10 (field index 5), 0-based sheet index.
+
+    Preferred method: extract the Workbook stream via xlrd.compdoc.CompDoc
+    (stream name b'Workbook', fall back to b'Book') and iterate BIFF records
+    properly (2-byte type + 2-byte length + data, walking pos += 4+len from
+    stream start).
+
+    Fallback method: scan the raw file bytes for the exact 4-byte header
+    b'\\x3d\\x00\\x12\\x00' and read itabCur from the following record data.
+
+    Any exception → return None (never raise out of this helper).
+    """
+    import struct
+
+    try:
+        path = Path(path)
+        raw_bytes = path.read_bytes()
+
+        # Preferred method: extract Workbook stream via CompDoc
+        try:
+            import xlrd.compdoc
+
+            compdoc = xlrd.compdoc.CompDoc(raw_bytes)
+            # Try 'Workbook' first, then 'Book' (older BIFF versions)
+            stream = None
+            for stream_name in (b"Workbook", b"Book"):
+                try:
+                    stream = compdoc.get_named_stream(stream_name)
+                    if stream is not None:
+                        break
+                except Exception:
+                    continue
+
+            if stream is not None:
+                # Iterate BIFF records: 2-byte type + 2-byte length + data
+                pos = 0
+                while pos + 4 <= len(stream):
+                    rec_type = struct.unpack_from("<H", stream, pos)[0]
+                    rec_len = struct.unpack_from("<H", stream, pos + 2)[0]
+                    if rec_type == 0x003D and rec_len >= 12:
+                        # WINDOW1 record found; read itabCur at data offset 10
+                        itab_cur = struct.unpack_from("<H", stream, pos + 4 + 10)[0]
+                        return itab_cur
+                    pos += 4 + rec_len
+        except Exception:
+            pass  # Fall through to raw-byte scan
+
+        # Fallback method: scan raw bytes for WINDOW1 header
+        # Header: type 0x003D (little-endian: b'\\x3d\\x00'), length 0x0012 (b'\\x12\\x00')
+        header = b"\x3d\x00\x12\x00"
+        idx = raw_bytes.find(header)
+        if idx != -1 and idx + 4 + 12 <= len(raw_bytes):
+            itab_cur = struct.unpack_from("<H", raw_bytes, idx + 4 + 10)[0]
+            return itab_cur
+
+        return None
+    except Exception:
+        return None
 
 
 def list_sheets(path: str | Path) -> list[SheetInfo]:
@@ -250,6 +323,9 @@ def list_sheets(path: str | Path) -> list[SheetInfo]:
             wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
         except Exception:
             return results
+        # Default sheet rule must match _read_xlsx: the workbook's ACTIVE sheet.
+        active = wb.active
+        default_name = active.title if active is not None else None
         for name in wb.sheetnames:
             ws = wb[name]
             rows: list[list[object]] = []
@@ -257,7 +333,13 @@ def list_sheets(path: str | Path) -> list[SheetInfo]:
                 rows.append(list(row))
                 if i >= 30:
                     break
-            results.append(SheetInfo(name=name, has_valid_header=_has_meal_header(rows)))
+            results.append(
+                SheetInfo(
+                    name=name,
+                    has_valid_header=_has_meal_header(rows),
+                    is_default=(name == default_name),
+                )
+            )
         wb.close()
     elif suffix == ".xls":
         import xlrd
@@ -266,12 +348,26 @@ def list_sheets(path: str | Path) -> list[SheetInfo]:
             wb = xlrd.open_workbook(str(path))
         except Exception:
             return results
-        for name in wb.sheet_names():
+        # Default sheet rule: the saved-selected tab (WINDOW1.itabCur) if
+        # recoverable, else the LAST sheet (fallback for older/corrupt files).
+        saved_idx = _xls_saved_selected_index(path)
+        nsheets = wb.nsheets
+        if saved_idx is not None and 0 <= saved_idx < nsheets:
+            default_index = saved_idx
+        else:
+            default_index = nsheets - 1
+        for i, name in enumerate(wb.sheet_names()):
             sh = wb.sheet_by_name(name)
             rows = []
             for r in range(min(sh.nrows, 31)):
                 rows.append([sh.cell(r, c).value for c in range(sh.ncols)])
-            results.append(SheetInfo(name=name, has_valid_header=_has_meal_header(rows)))
+            results.append(
+                SheetInfo(
+                    name=name,
+                    has_valid_header=_has_meal_header(rows),
+                    is_default=(i == default_index),
+                )
+            )
     return results
 
 
@@ -282,8 +378,8 @@ def _read_xls(path: Path, sheet_name: str | None = None, sheet_index: int | None
         path: Path to the .xls file.
         sheet_name: Optional sheet name to read.
         sheet_index: Optional sheet index to read. If neither sheet_name nor
-            sheet_index is given, the LAST sheet is used (xlrd has no active-
-            sheet concept; this is the agreed degradation for .xls).
+            sheet_index is given, the saved-selected tab (WINDOW1.itabCur) is
+            used if recoverable, else the LAST sheet (fallback).
 
     Returns:
         Tuple of (title_string, list_of_row_lists).
@@ -309,7 +405,12 @@ def _read_xls(path: Path, sheet_name: str | None = None, sheet_index: int | None
         except Exception:
             sh = wb.sheet_by_index(wb.nsheets - 1)
     else:
-        sh = wb.sheet_by_index(wb.nsheets - 1)
+        # Default sheet rule: saved-selected tab if recoverable, else last.
+        saved_idx = _xls_saved_selected_index(path)
+        if saved_idx is not None and 0 <= saved_idx < wb.nsheets:
+            sh = wb.sheet_by_index(saved_idx)
+        else:
+            sh = wb.sheet_by_index(wb.nsheets - 1)
 
     title = str(sh.cell(0, 0).value) if sh.nrows > 0 else ""
 

@@ -324,7 +324,7 @@ def render_step1_upload():
 
     if kind != "bonus":
         st.caption("返餐费与工会会费共用此上传入口和审批流程：两种模板均自动识别（返餐费末行『总计』，工会会费末行『合计』；工会会费多出的合计列自动忽略）。支持含/不含身份证号列的表格。")
-        st.caption("多工作表默认规则：.xlsx 默认读取活动工作表，.xls 默认读取最后一张工作表；上传后可通过工作表选择器手动切换。")
+        st.caption("多工作表默认规则：.xlsx 与 .xls 均默认读取保存时选中的工作表（.xls 无法识别时取最后一张）；上传后可通过工作表选择器手动切换。")
 
     if uploaded_file is not None:
         # Detect if this is a new upload (different from what's cached)
@@ -349,10 +349,14 @@ def render_step1_upload():
                 try:
                     infos = list_sheets(tmp_file.name)
                     st.session_state.sheet_infos = infos
-                    # Pick default sheet: first with valid header, else first
-                    valid = [s for s in infos if s.has_valid_header]
-                    default_name = valid[0].name if valid else (infos[0].name if infos else None)
-                    st.session_state.selected_sheet_name = default_name
+                    # Default sheet = the workbook's own default (.xlsx active / .xls last), as flagged by list_sheets.
+                    default = next((s for s in infos if s.is_default), None)
+                    if default is not None:
+                        st.session_state.selected_sheet_name = default.name
+                    else:
+                        # Fallback if nothing flagged (shouldn't happen): first with valid header, else first.
+                        valid = [s for s in infos if s.has_valid_header]
+                        st.session_state.selected_sheet_name = valid[0].name if valid else (infos[0].name if infos else None)
                 except Exception:
                     st.session_state.sheet_infos = None
                     st.session_state.selected_sheet_name = None
@@ -379,7 +383,7 @@ def render_step1_upload():
                 options=options,
                 index=current_idx,
                 key="sheet_selector",
-                help=".xlsx 默认活动工作表；.xls 默认最后一张工作表（xlrd 无活动表概念）。可随时切换，切换后自动重新解析。",
+                help=".xlsx 与 .xls 默认读取保存时选中的工作表（.xls 无法识别时取最后一张）。可随时切换，切换后自动重新解析。",
             )
             # Extract name from label (strip suffix)
             new_name = selected_label.replace(" （含表头）", "")
