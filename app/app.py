@@ -28,6 +28,7 @@ if _env_path.exists():
 from app.excel_parser import (
     parse_meal_refund_excel,
     parse_bonus_excel,
+    list_sheets,
     MealRefundSheet,
     BonusSheet,
 )
@@ -83,6 +84,10 @@ if "uploaded_filename" not in st.session_state:
     st.session_state.uploaded_filename = None
 if "name_lookup_failed" not in st.session_state:
     st.session_state.name_lookup_failed = False
+if "sheet_infos" not in st.session_state:
+    st.session_state.sheet_infos = None
+if "selected_sheet_name" not in st.session_state:
+    st.session_state.selected_sheet_name = None
 
 # ---------------------------------------------------------------------------
 # Helper functions
@@ -108,6 +113,8 @@ def _reset_sheet_state():
     st.session_state.remark = ""
     st.session_state.submitted = False
     st.session_state.uploaded_filename = None
+    st.session_state.sheet_infos = None
+    st.session_state.selected_sheet_name = None
 
 
 def _get_token() -> str:
@@ -316,35 +323,91 @@ def render_step1_upload():
     uploaded_file = st.file_uploader(label, type=["xls", "xlsx"])
 
     if kind != "bonus":
-        st.caption("返餐费与工会会费共用此上传入口和审批流程：两种模板均自动识别（返餐费末行『总计』，工会会费末行『合计』；工会会费多出的合计列自动忽略）。")
+        st.caption("返餐费与工会会费共用此上传入口和审批流程：两种模板均自动识别（返餐费末行『总计』，工会会费末行『合计』；工会会费多出的合计列自动忽略）。支持含/不含身份证号列的表格。")
+        st.caption("多工作表默认规则：.xlsx 默认读取活动工作表，.xls 默认读取最后一张工作表；上传后可通过工作表选择器手动切换。")
 
     if uploaded_file is not None:
-        # Clean up previous temp file
-        _cleanup_tmp_file()
+        # Detect if this is a new upload (different from what's cached)
+        current_tmp = st.session_state.get("tmp_file_path")
+        is_new_upload = (
+            current_tmp is None
+            or Path(current_tmp).name != uploaded_file.name
+            or not Path(current_tmp).exists()
+        )
 
-        # Save to temp file
-        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix)
-        tmp_file.write(uploaded_file.getvalue())
-        tmp_file.close()
-        st.session_state.tmp_file_path = tmp_file.name
-        st.session_state.uploaded_filename = uploaded_file.name
+        if is_new_upload:
+            _cleanup_tmp_file()
+            tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix)
+            tmp_file.write(uploaded_file.getvalue())
+            tmp_file.close()
+            st.session_state.tmp_file_path = tmp_file.name
+            st.session_state.uploaded_filename = uploaded_file.name
+            st.session_state.submitted = False
+
+            # List sheets for meal kind
+            if kind != "bonus":
+                try:
+                    infos = list_sheets(tmp_file.name)
+                    st.session_state.sheet_infos = infos
+                    # Pick default sheet: first with valid header, else first
+                    valid = [s for s in infos if s.has_valid_header]
+                    default_name = valid[0].name if valid else (infos[0].name if infos else None)
+                    st.session_state.selected_sheet_name = default_name
+                except Exception:
+                    st.session_state.sheet_infos = None
+                    st.session_state.selected_sheet_name = None
+            else:
+                st.session_state.sheet_infos = None
+                st.session_state.selected_sheet_name = None
+
+        # Sheet selector for meal kind (only if multiple sheets)
+        sheet_infos = st.session_state.get("sheet_infos")
+        if kind != "bonus" and sheet_infos and len(sheet_infos) > 1:
+            options = []
+            for si in sheet_infos:
+                suffix_label = " （含表头）" if si.has_valid_header else ""
+                options.append(f"{si.name}{suffix_label}")
+            current_name = st.session_state.get("selected_sheet_name") or ""
+            # Find current index
+            current_idx = 0
+            for i, si in enumerate(sheet_infos):
+                if si.name == current_name:
+                    current_idx = i
+                    break
+            selected_label = st.selectbox(
+                "选择工作表",
+                options=options,
+                index=current_idx,
+                key="sheet_selector",
+                help=".xlsx 默认活动工作表；.xls 默认最后一张工作表（xlrd 无活动表概念）。可随时切换，切换后自动重新解析。",
+            )
+            # Extract name from label (strip suffix)
+            new_name = selected_label.replace(" （含表头）", "")
+            if new_name != st.session_state.get("selected_sheet_name"):
+                st.session_state.selected_sheet_name = new_name
+                st.session_state.sheet = None
+                st.session_state.title = ""
+                st.session_state.remark = ""
+                st.session_state.submitted = False
 
         # Parse the file
-        try:
-            if kind == "bonus":
-                sheet = parse_bonus_excel(tmp_file.name)
-            else:
-                sheet = parse_meal_refund_excel(tmp_file.name)
-            st.session_state.sheet = sheet
-            st.session_state.title = sheet.title
-            st.session_state.submitted = False  # Reset submitted flag
-            st.success(f"解析成功：共 {len(sheet.rows)} 行数据")
-        except ValueError as e:
-            st.session_state.sheet = None
-            _render_error_with_traceback(f"解析失败：{e}", e)
-        except Exception as e:
-            st.session_state.sheet = None
-            _render_error_with_traceback(f"解析失败：{e}", e)
+        tmp_path = st.session_state.get("tmp_file_path")
+        if tmp_path and Path(tmp_path).exists() and st.session_state.sheet is None:
+            try:
+                if kind == "bonus":
+                    sheet = parse_bonus_excel(tmp_path)
+                else:
+                    selected_name = st.session_state.get("selected_sheet_name")
+                    sheet = parse_meal_refund_excel(tmp_path, sheet_name=selected_name)
+                st.session_state.sheet = sheet
+                st.session_state.title = sheet.title
+                st.success(f"解析成功：共 {len(sheet.rows)} 行数据")
+            except ValueError as e:
+                st.session_state.sheet = None
+                _render_error_with_traceback(f"解析失败：{e}", e)
+            except Exception as e:
+                st.session_state.sheet = None
+                _render_error_with_traceback(f"解析失败：{e}", e)
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,8 @@ from app.excel_parser import (
     MealRefundSheet,
     parse_bonus_excel,
     parse_meal_refund_excel,
+    list_sheets,
+    SheetInfo,
 )
 
 
@@ -958,3 +960,431 @@ class TestUnionFeeSheet:
         assert len(sheet.rows) == 3
         assert sheet.total_amount == ""
         assert not any("签字" in r.serial for r in sheet.rows)
+
+
+class TestThreeColumnNoID:
+    """Test suite for 3-column layout without ID card column."""
+
+    def test_three_col_no_id_parses(self, tmp_path: Path):
+        """3-col layout (序号/姓名/金额) parses correctly with id_card=''."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Test Title"
+        ws["A2"] = "序号"
+        ws["B2"] = "姓名"
+        ws["C2"] = "金额"
+        ws["A3"] = 1
+        ws["B3"] = "张三"
+        ws["C3"] = 100.50
+        ws["A4"] = 2
+        ws["B4"] = "李四"
+        ws["C4"] = 200
+        ws["A5"] = "总计"
+        ws["B5"] = "叁佰元伍角"
+        ws["C5"] = 300.50
+        ws["A7"] = "制表：测试"
+        fp = tmp_path / "three_col.xlsx"
+        wb.save(fp)
+
+        sheet = parse_meal_refund_excel(fp)
+        assert len(sheet.rows) == 2
+        assert sheet.rows[0].serial == "1"
+        assert sheet.rows[0].name == "张三"
+        assert sheet.rows[0].id_card == ""
+        assert sheet.rows[0].amount == "100.5"
+        assert sheet.rows[1].name == "李四"
+        assert sheet.rows[1].id_card == ""
+        assert sheet.rows[1].amount == "200"
+        assert sheet.total_amount == "300.5"
+        assert sheet.maker == "测试"
+
+    def test_three_col_no_id_card_warnings(self, tmp_path: Path):
+        """3-col layout produces no ID-card-related warnings."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Test"
+        ws["A2"] = "序号"
+        ws["B2"] = "姓名"
+        ws["C2"] = "金额"
+        ws["A3"] = 1
+        ws["B3"] = "张三"
+        ws["C3"] = 100
+        ws["A4"] = "总计"
+        ws["C4"] = 100
+        fp = tmp_path / "no_id.xlsx"
+        wb.save(fp)
+
+        sheet = parse_meal_refund_excel(fp)
+        assert not any("身份证号码为数字格式" in w for w in sheet.warnings)
+
+
+class TestMultiSheetWorkbooks:
+    """Test suite for multi-sheet workbook support."""
+
+    def test_list_sheets_xlsx(self, tmp_path: Path):
+        """list_sheets returns sheet names and header validity for .xlsx."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws1 = wb.active
+        ws1.title = "Sheet1"
+        ws1["A1"] = "Title"
+        ws1["A2"] = "序号"
+        ws1["B2"] = "姓名"
+        ws1["C2"] = "金额"
+        ws1["A3"] = 1
+        ws1["B3"] = "张三"
+        ws1["C3"] = 100
+
+        ws2 = wb.create_sheet("Sheet2")
+        ws2["A1"] = "No header here"
+
+        fp = tmp_path / "multi.xlsx"
+        wb.save(fp)
+
+        sheets = list_sheets(fp)
+        assert len(sheets) == 2
+        assert sheets[0].name == "Sheet1"
+        assert sheets[0].has_valid_header is True
+        assert sheets[1].name == "Sheet2"
+        assert sheets[1].has_valid_header is False
+
+    def test_list_sheets_xls(self, tmp_path: Path):
+        """list_sheets works for .xls files."""
+        pytest.importorskip("xlwt")
+        import xlwt
+
+        wb = xlwt.Workbook()
+        ws1 = wb.add_sheet("Sheet1")
+        ws1.write(0, 0, "序号")
+        ws1.write(0, 1, "姓名")
+        ws1.write(0, 2, "金额")
+        ws1.write(1, 0, 1)
+        ws1.write(1, 1, "张三")
+        ws1.write(1, 2, 100)
+
+        ws2 = wb.add_sheet("Sheet2")
+        ws2.write(0, 0, "No header")
+
+        fp = tmp_path / "multi.xls"
+        wb.save(fp)
+
+        sheets = list_sheets(fp)
+        assert len(sheets) == 2
+        assert sheets[0].name == "Sheet1"
+        assert sheets[0].has_valid_header is True
+        assert sheets[1].name == "Sheet2"
+        assert sheets[1].has_valid_header is False
+
+    def test_xlsx_default_active_sheet(self, tmp_path: Path):
+        """For .xlsx, default sheet is the active sheet."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws1 = wb.active
+        ws1.title = "InactiveSheet"
+        ws1["A1"] = "No header"
+
+        ws2 = wb.create_sheet("ActiveSheet")
+        ws2["A1"] = "Title"
+        ws2["A2"] = "序号"
+        ws2["B2"] = "姓名"
+        ws2["C2"] = "金额"
+        ws2["A3"] = 1
+        ws2["B3"] = "张三"
+        ws2["C3"] = 100
+        ws2["A4"] = "总计"
+        ws2["C4"] = 100
+        wb.active = ws2
+
+        fp = tmp_path / "active.xlsx"
+        wb.save(fp)
+
+        sheet = parse_meal_refund_excel(fp)
+        assert sheet.rows[0].name == "张三"
+
+    def test_xls_default_last_sheet(self, tmp_path: Path):
+        """For .xls, default sheet is the last sheet."""
+        pytest.importorskip("xlwt")
+        import xlwt
+
+        wb = xlwt.Workbook()
+        ws1 = wb.add_sheet("FirstSheet")
+        ws1.write(0, 0, "No header")
+
+        ws2 = wb.add_sheet("LastSheet")
+        ws2.write(0, 0, "序号")
+        ws2.write(0, 1, "姓名")
+        ws2.write(0, 2, "金额")
+        ws2.write(1, 0, 1)
+        ws2.write(1, 1, "张三")
+        ws2.write(1, 2, 100)
+        ws2.write(2, 0, "总计")
+        ws2.write(2, 2, 100)
+
+        fp = tmp_path / "last.xls"
+        wb.save(fp)
+
+        sheet = parse_meal_refund_excel(fp)
+        assert sheet.rows[0].name == "张三"
+
+    def test_sheet_selection_by_name(self, tmp_path: Path):
+        """Parse a specific sheet by name."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws1 = wb.active
+        ws1.title = "Sheet1"
+        ws1["A1"] = "Title1"
+        ws1["A2"] = "序号"
+        ws1["B2"] = "姓名"
+        ws1["C2"] = "金额"
+        ws1["A3"] = 1
+        ws1["B3"] = "张三"
+        ws1["C3"] = 100
+        ws1["A4"] = "总计"
+        ws1["C4"] = 100
+
+        ws2 = wb.create_sheet("Sheet2")
+        ws2["A1"] = "Title2"
+        ws2["A2"] = "序号"
+        ws2["B2"] = "姓名"
+        ws2["C2"] = "金额"
+        ws2["A3"] = 1
+        ws2["B3"] = "李四"
+        ws2["C3"] = 200
+        ws2["A4"] = "总计"
+        ws2["C4"] = 200
+
+        fp = tmp_path / "select.xlsx"
+        wb.save(fp)
+
+        sheet = parse_meal_refund_excel(fp, sheet_name="Sheet2")
+        assert sheet.title == "Title2"
+        assert sheet.rows[0].name == "李四"
+        assert sheet.rows[0].amount == "200"
+
+    def test_sheet_selection_by_index(self, tmp_path: Path):
+        """Parse a specific sheet by index."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws1 = wb.active
+        ws1.title = "Sheet1"
+        ws1["A1"] = "Title1"
+        ws1["A2"] = "序号"
+        ws1["B2"] = "姓名"
+        ws1["C2"] = "金额"
+        ws1["A3"] = 1
+        ws1["B3"] = "张三"
+        ws1["C3"] = 100
+        ws1["A4"] = "总计"
+        ws1["C4"] = 100
+
+        ws2 = wb.create_sheet("Sheet2")
+        ws2["A1"] = "Title2"
+        ws2["A2"] = "序号"
+        ws2["B2"] = "姓名"
+        ws2["C2"] = "金额"
+        ws2["A3"] = 1
+        ws2["B3"] = "李四"
+        ws2["C3"] = 200
+        ws2["A4"] = "总计"
+        ws2["C4"] = 200
+
+        fp = tmp_path / "index.xlsx"
+        wb.save(fp)
+
+        sheet = parse_meal_refund_excel(fp, sheet_index=1)
+        assert sheet.title == "Title2"
+        assert sheet.rows[0].name == "李四"
+
+
+class TestDuplicateNames:
+    """Test suite for duplicate name detection."""
+
+    def test_duplicate_names_kept_independent(self, tmp_path: Path):
+        """Duplicate names are kept as separate rows, never merged."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Test"
+        ws["A2"] = "序号"
+        ws["B2"] = "姓名"
+        ws["C2"] = "金额"
+        ws["A3"] = 1
+        ws["B3"] = "张三"
+        ws["C3"] = 100
+        ws["A4"] = 2
+        ws["B4"] = "张三"
+        ws["C4"] = 200
+        ws["A5"] = 3
+        ws["B5"] = "李四"
+        ws["C5"] = 300
+        ws["A6"] = "总计"
+        ws["C6"] = 600
+        fp = tmp_path / "dup.xlsx"
+        wb.save(fp)
+
+        sheet = parse_meal_refund_excel(fp)
+        assert len(sheet.rows) == 3
+        assert sheet.rows[0].name == "张三"
+        assert sheet.rows[0].amount == "100"
+        assert sheet.rows[1].name == "张三"
+        assert sheet.rows[1].amount == "200"
+        assert sheet.rows[2].name == "李四"
+
+    def test_duplicate_names_warning(self, tmp_path: Path):
+        """Duplicate names produce a warning listing names and counts."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Test"
+        ws["A2"] = "序号"
+        ws["B2"] = "姓名"
+        ws["C2"] = "金额"
+        ws["A3"] = 1
+        ws["B3"] = "张三"
+        ws["C3"] = 100
+        ws["A4"] = 2
+        ws["B4"] = "张三"
+        ws["C4"] = 200
+        ws["A5"] = 3
+        ws["B5"] = "李四"
+        ws["C5"] = 300
+        ws["A6"] = 4
+        ws["B6"] = "李四"
+        ws["C6"] = 400
+        ws["A7"] = "总计"
+        ws["C7"] = 1000
+        fp = tmp_path / "dup_warn.xlsx"
+        wb.save(fp)
+
+        sheet = parse_meal_refund_excel(fp)
+        dup_warnings = [w for w in sheet.warnings if "重复姓名" in w]
+        assert len(dup_warnings) == 1
+        assert "张三(2次)" in dup_warnings[0]
+        assert "李四(2次)" in dup_warnings[0]
+        assert "各行独立保留" in dup_warnings[0]
+
+
+class TestSkippedRows:
+    """Test suite for skipped-row accounting."""
+
+    def test_skipped_blank_rows_counted(self, tmp_path: Path):
+        """Blank rows are counted and reported in warnings."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Test"
+        ws["A2"] = "序号"
+        ws["B2"] = "姓名"
+        ws["C2"] = "金额"
+        ws["A3"] = 1
+        ws["B3"] = "张三"
+        ws["C3"] = 100
+        # Blank row 4
+        ws["A5"] = 2
+        ws["B5"] = "李四"
+        ws["C5"] = 200
+        ws["A6"] = "总计"
+        ws["C6"] = 300
+        fp = tmp_path / "blank.xlsx"
+        wb.save(fp)
+
+        sheet = parse_meal_refund_excel(fp)
+        assert len(sheet.rows) == 2
+        skip_warnings = [w for w in sheet.warnings if "跳过" in w]
+        assert len(skip_warnings) == 1
+        assert "1 行" in skip_warnings[0]
+
+    def test_skipped_nameless_rows_counted(self, tmp_path: Path):
+        """Rows with no name are counted and reported."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Test"
+        ws["A2"] = "序号"
+        ws["B2"] = "姓名"
+        ws["C2"] = "金额"
+        ws["A3"] = 1
+        ws["B3"] = "张三"
+        ws["C3"] = 100
+        ws["A4"] = 2
+        ws["B4"] = ""
+        ws["C4"] = 200
+        ws["A5"] = 3
+        ws["B5"] = "李四"
+        ws["C5"] = 300
+        ws["A6"] = "总计"
+        ws["C6"] = 400
+        fp = tmp_path / "nameless.xlsx"
+        wb.save(fp)
+
+        sheet = parse_meal_refund_excel(fp)
+        assert len(sheet.rows) == 2
+        skip_warnings = [w for w in sheet.warnings if "跳过" in w]
+        assert len(skip_warnings) == 1
+        assert "1 行" in skip_warnings[0]
+
+
+class TestEmptyIDCard:
+    """Test suite for empty ID card handling."""
+
+    def test_empty_id_card_cell_becomes_empty_string(self, tmp_path: Path):
+        """Empty/None ID card cell becomes '' (never 'None')."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Test"
+        ws["A2"] = "序号"
+        ws["B2"] = "姓名"
+        ws["C2"] = "身份证号码"
+        ws["D2"] = "金额"
+        ws["A3"] = 1
+        ws["B3"] = "张三"
+        ws["C3"] = None
+        ws["D3"] = 100
+        ws["A4"] = "总计"
+        ws["D4"] = 100
+        fp = tmp_path / "empty_id.xlsx"
+        wb.save(fp)
+
+        sheet = parse_meal_refund_excel(fp)
+        assert sheet.rows[0].id_card == ""
+        assert sheet.rows[0].id_card != "None"
+        assert "None" not in sheet.rows[0].id_card
+
+
+class TestRealFixtureThreeCol:
+    """Test suite using the real 3-col fixture file."""
+
+    def test_real_three_col_fixture(self):
+        """Test parsing the real 3-col fixture (博众返餐费.xlsx)."""
+        from pathlib import Path
+        from decimal import Decimal
+
+        fixture_path = Path("/home/ubuntu/excel_example/mealrefund/博众返餐费.xlsx")
+        if not fixture_path.exists():
+            pytest.skip("3-col fixture not available")
+
+        sheet = parse_meal_refund_excel(fixture_path)
+        assert len(sheet.rows) == 515
+        assert sheet.rows[0].name == "李宏奇"
+        assert Decimal(sheet.rows[0].amount) == Decimal("0.04")
+        assert sheet.rows[0].id_card == ""
+        assert sheet.rows[-1].name == "李妍宁"
+        assert Decimal(sheet.rows[-1].amount) == Decimal("0.33")
+        assert Decimal(sheet.total_amount) == Decimal("16153.95")
+        assert sheet.maker == "张三"
+        assert not any("身份证号码为数字格式" in w for w in sheet.warnings)
+        assert not any("不一致" in w for w in sheet.warnings)

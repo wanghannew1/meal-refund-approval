@@ -103,7 +103,10 @@ def _normalize_id_card(value: object) -> tuple[str, bool]:
         Tuple of (id_card_string, was_numeric).
         If the cell was numeric (float), converting to int may lose
         precision for 18-digit IDs — caller should add a warning.
+        None / blank → ('', False).
     """
+    if value is None:
+        return "", False
     if isinstance(value, float):
         # Numeric cell — convert via int, but warn about precision
         return str(int(value)), True
@@ -177,11 +180,110 @@ def _is_blank_row(row_values: list[object]) -> bool:
     return True
 
 
-def _read_xls(path: Path) -> tuple[str, list[list[object]]]:
+def _resolve_meal_header(cell_value: object) -> str | None:
+    """Return the canonical field name for a meal-refund header cell, or None.
+
+    Mapping (first match wins per field):
+        serial:   stripped text == "序号"
+        name:     stripped text == "姓名"
+        id_card:  text in {"身份证号码", "身份证号", "证件号"}
+        amount:   stripped text == "金额"
+    """
+    if cell_value is None:
+        return None
+    text = str(cell_value).strip()
+    if not text:
+        return None
+    if text == "序号":
+        return "serial"
+    if text == "姓名":
+        return "name"
+    if text in ("身份证号码", "身份证号", "证件号"):
+        return "id_card"
+    if text == "金额":
+        return "amount"
+    return None
+
+
+@dataclass(frozen=True)
+class SheetInfo:
+    """Metadata about one sheet in a workbook.
+
+    Attributes:
+        name: Sheet name.
+        has_valid_header: True if the sheet contains a recognized meal-refund
+            header row (序号 + 姓名 + 金额 columns).
+    """
+
+    name: str
+    has_valid_header: bool
+
+
+def _has_meal_header(rows: list[list[object]]) -> bool:
+    """Return True if any row contains the required meal header fields."""
+    required = {"serial", "name", "amount"}
+    for row in rows:
+        found: set[str] = set()
+        for cell in row:
+            field = _resolve_meal_header(cell)
+            if field is not None:
+                found.add(field)
+        if required.issubset(found):
+            return True
+    return False
+
+
+def list_sheets(path: str | Path) -> list[SheetInfo]:
+    """Return sheet names and header-validity for a workbook.
+
+    Supports .xls (xlrd) and .xlsx (openpyxl). Does not raise on unreadable
+    files — returns an empty list with a best-effort error entry.
+    """
+    path = Path(path)
+    suffix = path.suffix.lower()
+    results: list[SheetInfo] = []
+
+    if suffix == ".xlsx":
+        import openpyxl
+
+        try:
+            wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+        except Exception:
+            return results
+        for name in wb.sheetnames:
+            ws = wb[name]
+            rows: list[list[object]] = []
+            for i, row in enumerate(ws.iter_rows(values_only=True)):
+                rows.append(list(row))
+                if i >= 30:
+                    break
+            results.append(SheetInfo(name=name, has_valid_header=_has_meal_header(rows)))
+        wb.close()
+    elif suffix == ".xls":
+        import xlrd
+
+        try:
+            wb = xlrd.open_workbook(str(path))
+        except Exception:
+            return results
+        for name in wb.sheet_names():
+            sh = wb.sheet_by_name(name)
+            rows = []
+            for r in range(min(sh.nrows, 31)):
+                rows.append([sh.cell(r, c).value for c in range(sh.ncols)])
+            results.append(SheetInfo(name=name, has_valid_header=_has_meal_header(rows)))
+    return results
+
+
+def _read_xls(path: Path, sheet_name: str | None = None, sheet_index: int | None = None) -> tuple[str, list[list[object]]]:
     """Read an .xls file and return (title, all_rows).
 
     Args:
         path: Path to the .xls file.
+        sheet_name: Optional sheet name to read.
+        sheet_index: Optional sheet index to read. If neither sheet_name nor
+            sheet_index is given, the LAST sheet is used (xlrd has no active-
+            sheet concept; this is the agreed degradation for .xls).
 
     Returns:
         Tuple of (title_string, list_of_row_lists).
@@ -196,7 +298,19 @@ def _read_xls(path: Path) -> tuple[str, list[list[object]]]:
     except Exception as exc:
         raise ValueError(f"无法读取 Excel 文件: {exc}") from exc
 
-    sh = wb.sheet_by_index(0)
+    if sheet_name is not None:
+        try:
+            sh = wb.sheet_by_name(sheet_name)
+        except Exception:
+            sh = wb.sheet_by_index(wb.nsheets - 1)
+    elif sheet_index is not None:
+        try:
+            sh = wb.sheet_by_index(sheet_index)
+        except Exception:
+            sh = wb.sheet_by_index(wb.nsheets - 1)
+    else:
+        sh = wb.sheet_by_index(wb.nsheets - 1)
+
     title = str(sh.cell(0, 0).value) if sh.nrows > 0 else ""
 
     all_rows: list[list[object]] = []
@@ -209,11 +323,14 @@ def _read_xls(path: Path) -> tuple[str, list[list[object]]]:
     return title, all_rows
 
 
-def _read_xlsx(path: Path) -> tuple[str, list[list[object]]]:
+def _read_xlsx(path: Path, sheet_name: str | None = None, sheet_index: int | None = None) -> tuple[str, list[list[object]]]:
     """Read an .xlsx file and return (title, all_rows).
 
     Args:
         path: Path to the .xlsx file.
+        sheet_name: Optional sheet name to read.
+        sheet_index: Optional sheet index to read. If neither is given, the
+            workbook's ACTIVE sheet is used (openpyxl default).
 
     Returns:
         Tuple of (title_string, list_of_row_lists).
@@ -228,7 +345,13 @@ def _read_xlsx(path: Path) -> tuple[str, list[list[object]]]:
     except Exception as exc:
         raise ValueError(f"无法读取 Excel 文件: {exc}") from exc
 
-    ws = wb.active
+    if sheet_name is not None and sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+    elif sheet_index is not None and 0 <= sheet_index < len(wb.sheetnames):
+        ws = wb[wb.sheetnames[sheet_index]]
+    else:
+        ws = wb.active
+
     all_rows: list[list[object]] = []
     for row in ws.iter_rows(values_only=True):
         all_rows.append(list(row))
@@ -242,24 +365,35 @@ def _read_xlsx(path: Path) -> tuple[str, list[list[object]]]:
     return title, all_rows
 
 
-def parse_meal_refund_excel(path: str | Path) -> MealRefundSheet:
+def parse_meal_refund_excel(
+    path: str | Path,
+    sheet_name: str | None = None,
+    sheet_index: int | None = None,
+) -> MealRefundSheet:
     """Parse a meal refund detail spreadsheet.
 
     Supports .xls (xlrd) and .xlsx (openpyxl) formats.  The header row
-    is located by finding col0=="序号" AND col1=="姓名".  Data rows
-    follow until a total row or a blank row.
+    is located by matching column labels by name (not by fixed position):
+      - Required: 序号, 姓名, 金额
+      - Optional: 身份证号码 / 身份证号 / 证件号 (any alias)
+    Extra columns are ignored; column order is flexible.
+
+    Sheet selection:
+      - sheet_name: pick by exact sheet name
+      - sheet_index: pick by 0-based index
+      - Neither given: .xlsx -> active sheet; .xls -> last sheet
 
     Two total-row labels are recognized:
-      - 返餐费 (meal refund) format: col0=="总计" (4 columns)
-      - 工会会费 (union fee) format: col0=="合计" (5 columns, with an
-        extra 合计 column at index 4 that is ignored)
+      - 返餐费 (meal refund) format: col at serial index == "总计"
+      - 工会会费 (union fee) format: col at serial index == "合计"
 
-    The maker ("制表：...") is searched in subsequent rows after the
-    total row, scanning all columns of each row (so a signature row
-    that places "制表" in column index 4 is still found).
+    Duplicate names (same name on multiple rows) are kept as independent
+    rows; a non-blocking warning lists duplicated names and counts.
 
     Args:
         path: Path to the Excel file.
+        sheet_name: Optional sheet name to parse.
+        sheet_index: Optional 0-based sheet index to parse.
 
     Returns:
         MealRefundSheet with parsed data.
@@ -272,25 +406,39 @@ def parse_meal_refund_excel(path: str | Path) -> MealRefundSheet:
     suffix = path.suffix.lower()
 
     if suffix == ".xls":
-        title, all_rows = _read_xls(path)
+        title, all_rows = _read_xls(path, sheet_name=sheet_name, sheet_index=sheet_index)
     elif suffix == ".xlsx":
-        title, all_rows = _read_xlsx(path)
+        title, all_rows = _read_xlsx(path, sheet_name=sheet_name, sheet_index=sheet_index)
     else:
         raise ValueError(f"不支持的文件格式: {suffix}，仅支持 .xls 和 .xlsx")
 
-    # Locate header row
+    # Locate header row by matching column labels
+    required_fields = {"serial", "name", "amount"}
     header_row_idx: int | None = None
+    col_map: dict[str, int] = {}
     for idx, row in enumerate(all_rows):
-        if len(row) < 2:
-            continue
-        col0 = str(row[0]).strip() if row[0] is not None else ""
-        col1 = str(row[1]).strip() if row[1] is not None else ""
-        if col0 == "序号" and col1 == "姓名":
+        candidate: dict[str, int] = {}
+        for col_idx, cell in enumerate(row):
+            field_name = _resolve_meal_header(cell)
+            if field_name is not None and field_name not in candidate:
+                candidate[field_name] = col_idx
+        if required_fields.issubset(candidate):
             header_row_idx = idx
+            col_map = candidate
             break
 
     if header_row_idx is None:
-        raise ValueError('未找到表头行（需要包含"序号"和"姓名"列）')
+        raise ValueError('未找到表头行（需要包含"序号""姓名""金额"列）')
+
+    idx_serial = col_map["serial"]
+    idx_name = col_map["name"]
+    idx_amount = col_map["amount"]
+    idx_id: int | None = col_map.get("id_card")
+
+    # Maximum column index we need to pad rows to.
+    max_needed = max(idx_serial, idx_name, idx_amount)
+    if idx_id is not None:
+        max_needed = max(max_needed, idx_id)
 
     # Parse data rows
     rows: list[MealRefundRow] = []
@@ -298,32 +446,30 @@ def parse_meal_refund_excel(path: str | Path) -> MealRefundSheet:
     total_amount = ""
     total_chinese = ""
     maker = ""
+    skipped_count = 0
+    name_counts: dict[str, int] = {}
 
     data_start = header_row_idx + 1
     for idx in range(data_start, len(all_rows)):
         row = all_rows[idx]
 
-        # Pad row to at least 4 columns
-        while len(row) < 4:
+        # Pad row to cover all needed indices.
+        while len(row) <= max_needed:
             row.append(None)
 
-        col0_raw = row[0]
+        col0_raw = row[idx_serial]
 
         # Check for 总计 (返餐费) or 合计 (工会会费) total row
         col0_str = str(col0_raw).strip() if col0_raw is not None else ""
         if col0_str in ("总计", "合计"):
             # Extract total info.
-            # total_chinese comes from row[1]; may be empty for 工会会费
-            # (that is valid — leave it as "").
-            total_chinese = str(row[1]).strip() if row[1] is not None else ""
-            raw_total = str(row[3]).strip() if row[3] is not None else ""
+            # total_chinese comes from the name column; may be empty for 工会会费.
+            total_chinese = str(row[idx_name]).strip() if row[idx_name] is not None else ""
+            raw_total = str(row[idx_amount]).strip() if row[idx_amount] is not None else ""
             total_amount = _extract_total_amount(raw_total)
-            # row[4] (the 工会会费 extra 合计 column) is intentionally ignored.
 
             # Look for maker in subsequent rows. Scan ALL columns of each
-            # row (not just the first 4) so "制表：..." in column index 4
-            # of a 工会会费 signature row is still found. Widen the window
-            # from 5 to 8 rows to cover sheets with 说明 + blank + signature.
+            # row so "制表：..." in any column is still found.
             for subsequent_idx in range(idx + 1, min(idx + 8, len(all_rows))):
                 sub_row = all_rows[subsequent_idx]
                 for cell_idx in range(len(sub_row)):
@@ -336,28 +482,37 @@ def parse_meal_refund_excel(path: str | Path) -> MealRefundSheet:
             break
 
         # Defensive end-of-data guard: signature rows like "总经理签字："
-        # must never be parsed as data rows (e.g. when a sheet's total row
-        # is missing or mislabeled). Stop parsing as soon as we see one.
+        # must never be parsed as data rows.
         if "签字" in col0_str:
             break
 
         # Check for blank row
         if _is_blank_row(row):
+            skipped_count += 1
             continue
 
         # Parse data row
         serial_str, serial_was_float = _normalize_numeric(col0_raw)
-        name = str(row[1]).strip() if row[1] is not None else ""
-        id_card, id_was_numeric = _normalize_id_card(row[2])
-        amount_str, _ = _normalize_numeric(row[3])
+        name = str(row[idx_name]).strip() if row[idx_name] is not None else ""
+        if not name:
+            skipped_count += 1
+            continue
+
+        # Track name counts for duplicate detection
+        name_counts[name] = name_counts.get(name, 0) + 1
+
+        # ID card: use mapped column if present, else empty string
+        if idx_id is not None:
+            id_card, id_was_numeric = _normalize_id_card(row[idx_id])
+        else:
+            id_card, id_was_numeric = "", False
+
+        amount_str, _ = _normalize_numeric(row[idx_amount])
 
         if id_was_numeric:
             warnings.append(
                 f"第{idx + 1}行身份证号码为数字格式，可能丢失精度: {id_card}"
             )
-
-        if not name:
-            continue
 
         rows.append(
             MealRefundRow(
@@ -370,6 +525,16 @@ def parse_meal_refund_excel(path: str | Path) -> MealRefundSheet:
 
     if not rows:
         raise ValueError("未找到数据行")
+
+    # Duplicate name warning
+    dup_names = {n: c for n, c in name_counts.items() if c > 1}
+    if dup_names:
+        dup_parts = [f"{n}({c}次)" for n, c in sorted(dup_names.items())]
+        warnings.append(f"存在重复姓名: {', '.join(dup_parts)}（各行独立保留）")
+
+    # Skipped row warning
+    if skipped_count > 0:
+        warnings.append(f"跳过 {skipped_count} 行（空行/缺姓名/签字行）")
 
     # Validate sum
     if total_amount:

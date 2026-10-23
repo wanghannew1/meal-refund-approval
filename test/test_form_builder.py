@@ -149,6 +149,37 @@ class TestBuildFormWidgets:
         assert row[2]["value"] == "11010119900202234X"
         assert row[3]["value"] == "600"
 
+    def test_empty_id_card_passes_through_unchanged(self):
+        """Regression: id_card='' reaches the widget as '' — never coerced, never dropped."""
+        sheet = MealRefundSheet(
+            title="测试餐费明细（无身份证列）",
+            rows=[
+                MealRefundRow(serial="1", name="张三", id_card="", amount="500"),
+                MealRefundRow(serial="2", name="李四", id_card="110101199001011234", amount="600"),
+            ],
+            total_amount="1100",
+            total_chinese="",
+            maker="",
+            warnings=[],
+        )
+        widgets = build_form_widgets(sheet, "file_code_123")
+        detail_rows = widgets[1]["value"]
+
+        # Row with empty id_card is kept, not skipped
+        assert len(detail_rows) == 2
+
+        empty_cell = detail_rows[0][2]
+        assert empty_cell["id"] == WIDGET_ROW_ID_CARD
+        assert empty_cell["type"] == "input"
+        assert empty_cell["value"] == ""
+
+        # Normal 18-digit id_card is unaffected (no regression)
+        assert detail_rows[1][2]["value"] == "110101199001011234"
+
+        # Empty value survives JSON serialization
+        parsed = json.loads(json.dumps(widgets, ensure_ascii=False))
+        assert parsed[1]["value"][0][2]["value"] == ""
+
     def test_attachment_widget(self, sample_sheet: MealRefundSheet):
         """Test attachment widget contains file code."""
         widgets = build_form_widgets(sample_sheet, "file_code_abc")
