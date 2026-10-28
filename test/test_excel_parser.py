@@ -6,7 +6,6 @@ from pathlib import Path
 
 import openpyxl
 import pytest
-from collections import Counter
 from decimal import Decimal
 
 from app.excel_parser import (
@@ -1603,13 +1602,8 @@ class TestInsuranceHeaderDetection:
         normalized = [
             _insurance_normalize_text(rows[name_row_idx][col]) for _, col in resolved[2]
         ]
-        merged_cols: set[int] = set()
-        for min_c, max_c, label in (merged_groups or []):
-            if label and label not in {"序号", "单位名称", "人数", "参保人数"}:
-                merged_cols.update(range(min_c, max_c + 1))
-        counts = Counter(normalized)
         return [
-            f"{group}-{name}" if group and (col in merged_cols or counts[name] >= 2) else name
+            f"{group}-{name}" if group else name
             for (group, col), name in zip(resolved[2], normalized)
         ]
 
@@ -1629,7 +1623,7 @@ class TestInsuranceHeaderDetection:
         assert resolved[1] == 2
         cols = self._final_names(resolved, rows)
         assert cols == [
-            "个人2%", "大病险150", "单位6.5%", "缴费合计",
+            "已参保-个人2%", "已参保-大病险150", "已参保-单位6.5%", "已参保-缴费合计",
         ]
 
     def test_medical_2026_9_header_true(self, tmp_path):
@@ -1645,7 +1639,9 @@ class TestInsuranceHeaderDetection:
         assert resolved is not None
         assert resolved[0] == 2
         assert resolved[1] == 4
-        assert len(self._final_names(resolved, rows)) == 4
+        assert self._final_names(resolved, rows) == [
+            "已参保-个人2%", "已参保-大病险150", "已参保-单位6.5%", "已参保-缴费合计",
+        ]
 
     def test_injury_base_header_true(self, tmp_path):
         rows = [
@@ -1655,7 +1651,7 @@ class TestInsuranceHeaderDetection:
         ]
         resolved = _resolve_insurance_columns(rows)
         assert resolved is not None
-        assert len(self._final_names(resolved, rows)) == 2
+        assert self._final_names(resolved, rows) == ["已参保-单位0.16%", "已参保-缴费合计"]
 
     def test_public_fund_header_true(self, tmp_path):
         rows = [
@@ -1777,7 +1773,7 @@ class TestParseInsuranceExcel:
         assert sheet.rows[0].unit_name == "白城市洮北区公路管理段"
         assert sheet.rows[0].headcount == 5
         assert len(sheet.rows[0].fees) == 3
-        assert [f.name for f in sheet.rows[0].fees] == ["个人2%", "单位6.5%", "缴费合计"]
+        assert [f.name for f in sheet.rows[0].fees] == ["已参保-个人2%", "已参保-单位6.5%", "已参保-缴费合计"]
         assert [f.amount for f in sheet.rows[0].fees] == ["439.30", "1427.80", "1867.10"]
         assert sheet.maker == "张艳艳"
 

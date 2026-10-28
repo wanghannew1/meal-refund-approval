@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from collections import Counter
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
@@ -1319,14 +1318,11 @@ def parse_insurance_excel(
         _insurance_normalize_text(header_block[name_row_idx][col])
         for _, col in money_cols
     ]
-    merged_group_cols: set[int] = set()
-    for min_c, max_c, label in merged_groups:
-        if label and not _is_excluded_label(label):
-            merged_group_cols.update(range(min_c, max_c + 1))
-    name_counts = Counter(normalized_names)
+    # 多级表头：费用名 = 第一级组标签-第二级列名。
+    # 没有第一级组标签的单层表保持裸列名。
     fee_names: list[str] = []
     for (group, col), name in zip(money_cols, normalized_names):
-        if group and (col in merged_group_cols or name_counts[name] >= 2):
+        if group:
             fee_names.append(f"{group}-{name}")
         else:
             fee_names.append(name)

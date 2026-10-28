@@ -201,7 +201,7 @@ class TestInsuranceTemplates:
         assert sheet.rows[0].headcount == 5
         fees = sheet.rows[0].fees
         assert len(fees) == 3  # 大病险150 is empty → skipped
-        assert any(f.name == "个人2%" and f.amount == "439.30" for f in fees)
+        assert any(f.name == "已参保-个人2%" and f.amount == "439.30" for f in fees)
         assert sheet.maker == "张三"
         assert sheet.warnings == []
 
@@ -210,7 +210,7 @@ class TestInsuranceTemplates:
         assert sheet.title.startswith("白城市2026年1月工伤保险明细")
         assert len(sheet.rows) == 1
         assert sheet.rows[0].headcount == 5
-        assert sheet.rows[0].fees[0].name == "单位0.16%"
+        assert sheet.rows[0].fees[0].name == "已参保-单位0.16%"
         assert sheet.rows[0].fees[0].amount == "35.15"
         assert sheet.maker == "张三"
 
