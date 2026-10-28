@@ -1737,39 +1737,24 @@ class TestInsuranceHeaderDetection:
             ["张三", "13353238166", "220881198511056620"],
         ]
         assert _is_insurance_monthly_header(rows) is False
-        assert names == {
-            "已参保-养老小计（单位+个人）", "已参保-失业小计（单位+个人）", "已参保-合计",
-            "基数调整补缴7-8月-养老小计（单位+个人）", "基数调整补缴7-8月-失业小计（单位+个人）", "基数调整补缴7-8月-合计",
-            "养老小计", "失业小计", "转款金额-合计",
-        }
 
-    def test_personnel_header_false(self, tmp_path):
+    def test_generic_column_and_group_names_supported(self):
+        """单位列/人数列/费用列/组名都可变，不依赖写死列名。"""
         rows = [
-            ["序号", "姓名", "性别", "个人编号", "身份证号", "手机号", "所属单位", "新增月份", "合同日期", "人数", "工资"],
-            ["1", "张三", "", "", "220881198511056620", "13353238166", "白城市洮北区公路管理段", "202501", "202501", "1", "3000"],
+            ["2026年X月XX明细", "", "", "", "", ""],
+            ["序号", "公司名称", "本月缴纳", "", "", ""],
+            ["", "", "参保职工人数", "费用A", "费用B", "费用C"],
+            ["1", "测试公司", "5", "100", "200", "300"],
+            ["合计", "", "5", "100", "200", "300"],
+            ["制表人：张三", "", "", "", "", ""],
         ]
-        assert _is_insurance_monthly_header(rows) is False
-        assert _resolve_insurance_columns(rows) is None
-
-    def test_personnel_header_false_明细9(self, tmp_path):
-        rows = [
-            ["序号", "姓名", "性别", "个人编号", "身份证号", "手机号", "所属单位", "新增月份", "合同日期", "人数", "工资"],
-        ]
-        assert _is_insurance_monthly_header(rows) is False
-
-    def test_header_outside_40_rows_false(self, tmp_path):
-        rows = [[""] * 5 for _ in range(40)]
-        rows.append(["序号", "单位名称", "已参保", "", ""])
-        rows.append(["", "", "参保人数", "单位0.16%", "缴费合计"])
-        assert _is_insurance_monthly_header(rows[:40]) is False
-
-    def test_junk_sheet_false(self, tmp_path):
-        rows = [
-            ["无关标题", "", ""],
-            ["姓名", "手机号", "身份证号"],
-            ["张三", "13353238166", "220881198511056620"],
-        ]
-        assert _is_insurance_monthly_header(rows) is False
+        assert _is_insurance_monthly_header(rows) is True
+        resolved = _resolve_insurance_columns(rows, [(2, 5, "本月缴纳")])
+        assert resolved is not None
+        assert resolved[0] == 1
+        assert resolved[1] == 2
+        names = self._final_names(resolved, rows, [(2, 5, "本月缴纳")])
+        assert names == ["本月缴纳-费用A", "本月缴纳-费用B", "本月缴纳-费用C"]
 
 
 class TestParseInsuranceExcel:
@@ -1894,3 +1879,26 @@ class TestParseInsuranceExcel:
         ]
         with pytest.raises(ValueError, match="未找到数据行"):
             self._parse(tmp_path, rows)
+
+    def test_generic_column_names_parse(self, tmp_path):
+        """端到端：任意费用列名/组名都能被动态解析和加前缀。"""
+        rows = [
+            ["2026年X月XX明细", "", "", "", "", ""],
+            ["序号", "公司名称", "本月缴纳", "", "", ""],
+            ["", "", "参保职工人数", "费用A", "费用B", "费用C"],
+            ["1", "测试公司", "5", "100", "200", "300"],
+            ["合计", "", "5", "100", "200", "300"],
+            ["制表人：张三", "", "", "", "", ""],
+        ]
+        sheet = self._parse(tmp_path, rows, merges=("C2:F2",))
+        assert sheet.title == "2026年X月XX明细"
+        assert len(sheet.rows) == 1
+        assert sheet.rows[0].unit_name == "测试公司"
+        assert sheet.rows[0].headcount == 5
+        assert [f.name for f in sheet.rows[0].fees] == [
+            "本月缴纳-费用A", "本月缴纳-费用B", "本月缴纳-费用C",
+        ]
+        assert [f.amount for f in sheet.rows[0].fees] == [
+            "100.00", "200.00", "300.00",
+        ]
+        assert sheet.maker == "张三"

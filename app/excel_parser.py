@@ -1012,7 +1012,9 @@ class InsuranceSheet:
     warnings: list[str] = field(default_factory=list)
 
 
-_INSURANCE_EXCLUDED = frozenset({"序号", "单位名称", "人数", "参保人数"})
+_INSURANCE_EXCLUDED = frozenset({"序号"})
+_UNIT_HEADER_LABELS = frozenset({"单位名称", "单位", "公司名称", "企业名称"})
+_PERSON_LEVEL_MARKERS = frozenset({"所属单位", "姓名", "身份证号", "身份证号码"})
 
 
 def _insurance_normalize_text(cell: object) -> str:
@@ -1022,14 +1024,26 @@ def _insurance_normalize_text(cell: object) -> str:
     return re.sub(r"\s+", "", str(cell)).strip()
 
 
+def _is_unit_header_label(text: str) -> bool:
+    return text in _UNIT_HEADER_LABELS
+
+
+def _is_headcount_label(text: str) -> bool:
+    return text.endswith("人数")
+
+
 def _is_excluded_label(text: str) -> bool:
-    return text in _INSURANCE_EXCLUDED
+    return (
+        text in _INSURANCE_EXCLUDED
+        or _is_unit_header_label(text)
+        or _is_headcount_label(text)
+    )
 
 
 def _find_unit_row(rows: list[list[object]]) -> int | None:
     for idx, row in enumerate(rows):
         for cell in row:
-            if _insurance_normalize_text(cell) == "单位名称":
+            if _is_unit_header_label(_insurance_normalize_text(cell)):
                 return idx
     return None
 
@@ -1058,20 +1072,20 @@ def _group_label_for_col(header_rows: list[list[object]], name_row_idx: int, col
 
 def _is_insurance_monthly_header(rows: list[list[object]]) -> bool:
     """人员级表头含 所属单位/姓名/身份证号，一律判False；
-    分单位月度表头需同时出现 单位名称 与 已参保/参保人数。"""
+    分单位月度表头需出现单位列与任意“人数”列，具体列名/组名不做写死。"""
     for row in rows[:40]:
         for cell in row:
             text = _insurance_normalize_text(cell)
-            if text in ("所属单位", "姓名", "身份证号"):
+            if text in _PERSON_LEVEL_MARKERS:
                 return False
     has_unit = False
     has_count = False
     for row in rows[:40]:
         for cell in row:
             text = _insurance_normalize_text(cell)
-            if text == "单位名称":
+            if _is_unit_header_label(text):
                 has_unit = True
-            if text in ("已参保", "参保人数"):
+            if _is_headcount_label(text):
                 has_count = True
     return has_unit and has_count
 
@@ -1084,7 +1098,7 @@ def _resolve_insurance_columns(header_rows: list[list[object]], merged_groups: l
     unit_row = header_rows[unit_row_idx]
     unit_col = None
     for col, cell in enumerate(unit_row):
-        if _insurance_normalize_text(cell) == "单位名称":
+        if _is_unit_header_label(_insurance_normalize_text(cell)):
             unit_col = col
             break
     if unit_col is None:
@@ -1098,17 +1112,9 @@ def _resolve_insurance_columns(header_rows: list[list[object]], merged_groups: l
     headcount_col = None
     for col, cell in enumerate(name_row):
         text = _insurance_normalize_text(cell)
-        if text in ("人数", "参保人数"):
-            above_cell = header_rows[unit_row_idx][col] if col < len(header_rows[unit_row_idx]) else None
-            if _insurance_normalize_text(above_cell) == "已参保":
-                headcount_col = col
-                break
-    if headcount_col is None:
-        for col, cell in enumerate(name_row):
-            text = _insurance_normalize_text(cell)
-            if text in ("人数", "参保人数"):
-                headcount_col = col
-                break
+        if _is_headcount_label(text):
+            headcount_col = col
+            break
     if headcount_col is None:
         return None
 
