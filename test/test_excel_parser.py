@@ -4,14 +4,26 @@ Tests for Excel parser module.
 
 from pathlib import Path
 
+import openpyxl
 import pytest
+from collections import Counter
+from decimal import Decimal
 
 from app.excel_parser import (
     BonusRow,
     BonusSheet,
+    InsuranceFeeItem,
+    InsuranceSheet,
+    InsuranceUnitRow,
     MealRefundRow,
     MealRefundSheet,
+    _find_unit_row,
+    _insurance_normalize_text,
+    _is_insurance_monthly_header,
+    _resolve_insurance_columns,
+    list_insurance_sheets,
     parse_bonus_excel,
+    parse_insurance_excel,
     parse_meal_refund_excel,
     list_sheets,
     SheetInfo,
@@ -1566,3 +1578,308 @@ class TestRealFixtureThreeCol:
         assert sheet.maker == "张三"
         assert not any("身份证号码为数字格式" in w for w in sheet.warnings)
         assert not any("不一致" in w for w in sheet.warnings)
+
+
+class _InsuranceWorkbook:
+    @staticmethod
+    def make(tmp_path: Path, rows: list[list[object]], sheet_name: str = "Sheet1") -> Path:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = sheet_name
+        for r, row in enumerate(rows, start=1):
+            for c, val in enumerate(row, start=1):
+                ws.cell(row=r, column=c, value=val)
+        fp = tmp_path / f"{sheet_name}.xlsx"
+        wb.save(fp)
+        return fp
+
+
+class TestInsuranceHeaderDetection:
+    def _final_names(self, resolved, rows):
+        unit_row_idx = _find_unit_row(rows)
+        name_row_idx = unit_row_idx + 1
+        normalized = [
+            _insurance_normalize_text(rows[name_row_idx][col]) for _, col in resolved[2]
+        ]
+        counts = Counter(normalized)
+        return [
+            f"{group}-{name}" if counts[name] >= 2 and group else name
+            for (group, col), name in zip(resolved[2], normalized)
+        ]
+
+    def test_medical_base_header_true(self, tmp_path):
+        rows = [
+            ["2026年2月医疗保险明细【白城分公司】", "", "", "", "", "", ""],
+            ["序号", "单位名称", "已参保", "", "", "", ""],
+            ["", "", "参保人数", "个人2%", "大病险150", "单位6.5%", "缴费合计"],
+        ]
+        fp = _InsuranceWorkbook.make(tmp_path, rows)
+        infos = list_insurance_sheets(fp)
+        assert len(infos) == 1
+        assert infos[0].has_valid_header is True
+        resolved = _resolve_insurance_columns(rows)
+        assert resolved is not None
+        assert resolved[0] == 1
+        assert resolved[1] == 2
+        cols = self._final_names(resolved, rows)
+        assert cols == [
+            "个人2%", "大病险150", "单位6.5%", "缴费合计",
+        ]
+
+    def test_medical_2026_9_header_true(self, tmp_path):
+        rows = [
+            ["2026年10月医疗保险明细【白城分公司】", "", "", "", "", "", "", "", ""],
+            ["序号", "", "单位名称", "", "已参保", "", "", "", ""],
+            ["", "", "", "", "参保人数", "个人2%", "大病险150", "单位6.5%", "缴费合计"],
+        ]
+        fp = _InsuranceWorkbook.make(tmp_path, rows)
+        infos = list_insurance_sheets(fp)
+        assert infos[0].has_valid_header is True
+        resolved = _resolve_insurance_columns(rows)
+        assert resolved is not None
+        assert resolved[0] == 2
+        assert resolved[1] == 4
+        assert len(self._final_names(resolved, rows)) == 4
+
+    def test_injury_base_header_true(self, tmp_path):
+        rows = [
+            ["2026年1月工伤保险明细【白城分公司】", "", "", ""],
+            ["序号", "单位名称", "已参保", "", ""],
+            ["", "", "参保人数", "单位0.16%", "缴费合计"],
+        ]
+        resolved = _resolve_insurance_columns(rows)
+        assert resolved is not None
+        assert len(self._final_names(resolved, rows)) == 2
+
+    def test_public_fund_header_true(self, tmp_path):
+        rows = [
+            ["白城分公司2026年1月公积金转款明细", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+            ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+            ["序号", "单位名称", "已参保", "", "", "", "", "补收", "", "", "", "转款金额", "", "", "", "", "", ""],
+            ["", "", "人数", "单位12%", "个人8%", "单位5%", "个人5%", "合计", "人数", "单位12%", "个人8%", "合计", "单位12%", "个人8%", "单位5%", "个人5%", "合计", "", ""],
+        ]
+        resolved = _resolve_insurance_columns(rows, [(2, 7, "已参保"), (8, 11, "补收"), (12, 16, "转款金额")])
+        assert resolved is not None
+        cols = self._final_names(resolved, rows)
+        assert len(cols) == 13
+        names = set(cols)
+        assert names == {
+            "已参保-单位12%", "已参保-个人8%", "已参保-单位5%", "已参保-个人5%", "已参保-合计",
+            "补收-单位12%", "补收-个人8%", "补收-合计",
+            "转款金额-单位12%", "转款金额-个人8%", "转款金额-单位5%", "转款金额-个人5%", "转款金额-合计",
+        }
+
+    def test_social_security_base_header_true(self, tmp_path):
+        rows = [
+            ["白城分公司2026年1月社保转款明细", "", "", "", "", "", "", "", ""],
+            ["", "", "", "", "", "", "", "", ""],
+            ["序号", "单位名称", "已参保", "", "", "", "转款金额", "", "", ""],
+            ["", "", "人数", "养老小计（单位+个人）", "失业小计（单位+个人）", "合计", "养老小计", "失业小计", "合计", "", ""],
+        ]
+        resolved = _resolve_insurance_columns(rows, [(2, 5, "已参保"), (6, 8, "转款金额")])
+        assert resolved is not None
+        cols = self._final_names(resolved, rows)
+        assert len(cols) == 6
+        names = set(cols)
+        assert names == {
+            "养老小计（单位+个人）", "失业小计（单位+个人）", "已参保-合计",
+            "养老小计", "失业小计", "转款金额-合计",
+        }
+
+    def test_social_security_9月_header_true(self, tmp_path):
+        rows = [
+            ["白城分公司2026年9月社保转款明细", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+            ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+            ["序号", "单位名称", "已参保", "", "", "", "基数调整补缴7-8月", "", "", "", "转款金额", "", "", "", "", "", "", "", ""],
+            ["", "", "人数", "养老小计（单位+个人）", "失业小计（单位+个人）", "合计", "养老小计（单位+个人）", "失业小计（单位+个人）", "合计", "养老小计", "失业小计", "合计", "", "", "", "", "", "", ""],
+        ]
+        resolved = _resolve_insurance_columns(rows, [(2, 5, "已参保"), (6, 8, "基数调整补缴7-8月"), (9, 11, "转款金额")])
+        assert resolved is not None
+        cols = self._final_names(resolved, rows)
+        assert len(cols) == 9
+        names = set(cols)
+        assert names == {
+            "已参保-养老小计（单位+个人）", "已参保-失业小计（单位+个人）", "已参保-合计",
+            "基数调整补缴7-8月-养老小计（单位+个人）", "基数调整补缴7-8月-失业小计（单位+个人）", "基数调整补缴7-8月-合计",
+            "养老小计", "失业小计", "转款金额-合计",
+        }
+
+    def test_personnel_header_false(self, tmp_path):
+        rows = [
+            ["序号", "姓名", "性别", "个人编号", "身份证号", "手机号", "所属单位", "新增月份", "合同日期", "人数", "工资"],
+            ["1", "张三", "", "", "220881198511056620", "13353238166", "白城市洮北区公路管理段", "202501", "202501", "1", "3000"],
+        ]
+        assert _is_insurance_monthly_header(rows) is False
+        assert _resolve_insurance_columns(rows) is None
+
+    def test_personnel_header_false_明细9(self, tmp_path):
+        rows = [
+            ["序号", "姓名", "性别", "个人编号", "身份证号", "手机号", "所属单位", "新增月份", "合同日期", "人数", "工资"],
+        ]
+        assert _is_insurance_monthly_header(rows) is False
+
+    def test_header_outside_40_rows_false(self, tmp_path):
+        rows = [[""] * 5 for _ in range(40)]
+        rows.append(["序号", "单位名称", "已参保", "", ""])
+        rows.append(["", "", "参保人数", "单位0.16%", "缴费合计"])
+        assert _is_insurance_monthly_header(rows[:40]) is False
+
+    def test_junk_sheet_false(self, tmp_path):
+        rows = [
+            ["无关标题", "", ""],
+            ["姓名", "手机号", "身份证号"],
+            ["张三", "13353238166", "220881198511056620"],
+        ]
+        assert _is_insurance_monthly_header(rows) is False
+        assert names == {
+            "已参保-养老小计（单位+个人）", "已参保-失业小计（单位+个人）", "已参保-合计",
+            "基数调整补缴7-8月-养老小计（单位+个人）", "基数调整补缴7-8月-失业小计（单位+个人）", "基数调整补缴7-8月-合计",
+            "养老小计", "失业小计", "转款金额-合计",
+        }
+
+    def test_personnel_header_false(self, tmp_path):
+        rows = [
+            ["序号", "姓名", "性别", "个人编号", "身份证号", "手机号", "所属单位", "新增月份", "合同日期", "人数", "工资"],
+            ["1", "张三", "", "", "220881198511056620", "13353238166", "白城市洮北区公路管理段", "202501", "202501", "1", "3000"],
+        ]
+        assert _is_insurance_monthly_header(rows) is False
+        assert _resolve_insurance_columns(rows) is None
+
+    def test_personnel_header_false_明细9(self, tmp_path):
+        rows = [
+            ["序号", "姓名", "性别", "个人编号", "身份证号", "手机号", "所属单位", "新增月份", "合同日期", "人数", "工资"],
+        ]
+        assert _is_insurance_monthly_header(rows) is False
+
+    def test_header_outside_40_rows_false(self, tmp_path):
+        rows = [[""] * 5 for _ in range(40)]
+        rows.append(["序号", "单位名称", "已参保", "", ""])
+        rows.append(["", "", "参保人数", "单位0.16%", "缴费合计"])
+        assert _is_insurance_monthly_header(rows[:40]) is False
+
+    def test_junk_sheet_false(self, tmp_path):
+        rows = [
+            ["无关标题", "", ""],
+            ["姓名", "手机号", "身份证号"],
+            ["张三", "13353238166", "220881198511056620"],
+        ]
+        assert _is_insurance_monthly_header(rows) is False
+
+
+class TestParseInsuranceExcel:
+    def _parse(self, tmp_path: Path, rows: list[list[object]]):
+        fp = _InsuranceWorkbook.make(tmp_path, rows)
+        return parse_insurance_excel(fp)
+
+    def test_medical_base_empty_amount_skipped(self, tmp_path):
+        rows = [
+            ["2026年2月医疗保险明细【白城分公司】", "", "", "", "", "", ""],
+            ["序号", "单位名称", "已参保", "", "", "", ""],
+            ["", "", "参保人数", "个人2%", "大病险150", "单位6.5%", "缴费合计"],
+            ["1", "白城市洮北区公路管理段", "5.0", "439.3", "", "1427.8", "1867.1"],
+            ["合计", "", "5.0", "439.3", "", "1427.8", "1867.1"],
+            ["总经理审批：", "财务审核：", "制表人：张艳艳", "", "", "", ""],
+        ]
+        sheet = self._parse(tmp_path, rows)
+        assert sheet.title == "2026年2月医疗保险明细【白城分公司】"
+        assert len(sheet.rows) == 1
+        assert sheet.rows[0].unit_name == "白城市洮北区公路管理段"
+        assert sheet.rows[0].headcount == 5
+        assert len(sheet.rows[0].fees) == 3
+        assert [f.name for f in sheet.rows[0].fees] == ["个人2%", "单位6.5%", "缴费合计"]
+        assert [f.amount for f in sheet.rows[0].fees] == ["439.30", "1427.80", "1867.10"]
+        assert sheet.maker == "张艳艳"
+
+    def test_public_fund_empty_columns_skipped(self, tmp_path):
+        rows = [
+            ["白城分公司2026年1月公积金转款明细", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+            ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+            ["序号", "单位名称", "已参保", "", "", "", "", "补收", "", "", "", "转款金额", "", "", "", "", "", ""],
+            ["", "", "人数", "单位12%", "个人8%", "单位5%", "个人5%", "合计", "人数", "单位12%", "个人8%", "合计", "单位12%", "个人8%", "单位5%", "个人5%", "合计", "", ""],
+            ["1", "白城市洮北区公路管理段", "5", "1184", "1776", "", "", "2960", "", "", "", "", "1184", "1776", "", "", "2960", "", ""],
+            ["合计", "", "5", "1184", "1776", "0", "0", "2960", "0", "0", "0", "0", "1184", "1776", "0", "0", "2960", "", ""],
+            ["总经理审批：", "财务审核：", "制表：  张艳艳", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+        ]
+        sheet = self._parse(tmp_path, rows)
+        assert len(sheet.rows) == 1
+        assert sheet.rows[0].headcount == 5
+        assert len(sheet.rows[0].fees) == 6
+        assert [f.name for f in sheet.rows[0].fees] == [
+            "已参保-单位12%", "已参保-个人8%", "已参保-合计",
+            "转款金额-单位12%", "转款金额-个人8%", "转款金额-合计",
+        ]
+        assert [f.amount for f in sheet.rows[0].fees] == [
+            "1184.00", "1776.00", "2960.00", "1184.00", "1776.00", "2960.00",
+        ]
+        assert sheet.maker == "张艳艳"
+
+    def test_social_security_base(self, tmp_path):
+        rows = [
+            ["白城分公司2026年1月社保转款明细", "", "", "", "", "", "", "", ""],
+            ["", "", "", "", "", "", "", "", ""],
+            ["序号", "单位名称", "已参保", "", "", "", "转款金额", "", "", ""],
+            ["", "", "人数", "养老小计（单位+个人）", "失业小计（单位+个人）", "合计", "养老小计", "失业小计", "合计", "", ""],
+            ["1", "白城市洮北区公路管理段", "5", "5271.85", "219.65", "5491.5", "5271.85", "219.65", "5491.5", "", ""],
+            ["合计", "", "5", "5271.85", "219.65", "5491.5", "5271.85", "219.65", "5491.5", "", ""],
+            ["总经理审批：", "财务审核：", "制表：  张艳艳", "", "", "", "", "", "", ""],
+        ]
+        sheet = self._parse(tmp_path, rows)
+        assert len(sheet.rows[0].fees) == 6
+        assert [f.name for f in sheet.rows[0].fees] == [
+            "养老小计（单位+个人）", "失业小计（单位+个人）", "已参保-合计",
+            "养老小计", "失业小计", "转款金额-合计",
+        ]
+        assert [f.amount for f in sheet.rows[0].fees] == [
+            "5271.85", "219.65", "5491.50", "5271.85", "219.65", "5491.50",
+        ]
+
+    def test_social_security_9月(self, tmp_path):
+        rows = [
+            ["白城分公司2026年9月社保转款明细", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+            ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+            ["序号", "单位名称", "已参保", "", "", "", "基数调整补缴7-8月", "", "", "", "转款金额", "", "", "", "", "", "", "", ""],
+            ["", "", "人数", "养老小计（单位+个人）", "失业小计（单位+个人）", "合计", "养老小计（单位+个人）", "失业小计（单位+个人）", "合计", "养老小计", "失业小计", "合计", "", "", "", "", "", "", ""],
+            ["1", "白城市洮北区公路管理段", "5", "5386.65", "224.45", "5611.1", "229.6", "9.6", "239.2", "5616.25", "234.05", "5850.3", "", "", "", "", "", "", ""],
+            ["合计", "", "5", "5386.65", "224.45", "5611.1", "229.6", "9.6", "239.2", "5616.25", "234.05", "5850.3", "", "", "", "", "", "", ""],
+            ["总经理审批：", "分管领导审核：", "财务审核：", "业务审核：", "制表人：张艳艳", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+        ]
+        sheet = self._parse(tmp_path, rows)
+        assert len(sheet.rows[0].fees) == 9
+        assert sheet.rows[0].headcount == 5
+        assert sheet.maker == "张艳艳"
+
+    def test_more_than_17_fees_raises(self, tmp_path):
+        header = ["序号", "单位名称", "已参保"] + [f"费用{i}" for i in range(18)]
+        data = ["1", "单位", "5"] + ["1"] * 18
+        total = ["合计", "", "5"] + ["1"] * 18
+        rows = [
+            ["标题", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+            ["序号", "单位名称", "已参保"] + [""] * 18,
+            ["", "", "人数"] + header[3:],
+            data,
+            total,
+            ["制表人：张三", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+        ]
+        with pytest.raises(ValueError, match="费用项超过17项"):
+            self._parse(tmp_path, rows)
+
+    def test_personnel_sheet_not_valid(self, tmp_path):
+        rows = [
+            ["序号", "姓名", "性别", "个人编号", "身份证号", "手机号", "所属单位", "新增月份", "合同日期", "人数", "工资"],
+            ["1", "张三", "", "", "220881198511056620", "13353238166", "白城市洮北区公路管理段", "202501", "202501", "1", "3000"],
+        ]
+        fp = _InsuranceWorkbook.make(tmp_path, rows)
+        infos = list_insurance_sheets(fp)
+        assert infos[0].has_valid_header is False
+        with pytest.raises(ValueError, match="未找到有效分单位表"):
+            parse_insurance_excel(fp)
+
+    def test_no_data_rows_raises(self, tmp_path):
+        rows = [
+            ["2026年2月医疗保险明细【白城分公司】", "", "", "", "", "", ""],
+            ["序号", "单位名称", "已参保", "", "", "", ""],
+            ["", "", "参保人数", "个人2%", "大病险150", "单位6.5%", "缴费合计"],
+            ["合计", "", "5.0", "439.3", "", "1427.8", "1867.1"],
+        ]
+        with pytest.raises(ValueError, match="未找到数据行"):
+            self._parse(tmp_path, rows)

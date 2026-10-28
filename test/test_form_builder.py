@@ -6,10 +6,12 @@ import json
 
 import pytest
 
-from app.excel_parser import BonusRow, BonusSheet, MealRefundRow, MealRefundSheet
+from app.excel_parser import BonusRow, BonusSheet, InsuranceFeeItem, InsuranceSheet, InsuranceUnitRow, MealRefundRow, MealRefundSheet
+import app.form_builder as form_builder_module
 from app.form_builder import (
-    APPROVAL_CODE,
-    BONUS_APPROVAL_CODE,
+    INSURANCE_FEE_WIDGET_PAIRS,
+    INS_UNITS_NAME,
+    INS_HEADCOUNT,
     WIDGET_ATTACHMENT,
     WIDGET_BONUS_ADJUSTMENT,
     WIDGET_BONUS_AMOUNT,
@@ -31,6 +33,7 @@ from app.form_builder import (
     WIDGET_TITLE,
     build_bonus_form_widgets,
     build_form_widgets,
+    build_insurance_form_widgets,
 )
 
 
@@ -84,11 +87,6 @@ class TestWidgetConstants:
     def test_widget_remark_id(self):
         """Test remark widget ID."""
         assert WIDGET_REMARK == "widget17811635300840001"
-
-    def test_approval_code(self):
-        """Test approval code constant."""
-        assert APPROVAL_CODE == "081B5624-B8B7-4334-AF42-D1075F8E650A"
-
 
 class TestBuildFormWidgets:
     """Test suite for build_form_widgets function."""
@@ -258,10 +256,6 @@ def sample_bonus_sheet() -> BonusSheet:
 
 class TestBonusWidgetConstants:
     """Test that bonus widget ID constants match verified values."""
-
-    def test_bonus_approval_code(self):
-        """Test bonus approval code constant."""
-        assert BONUS_APPROVAL_CODE == "01BA9019-4E75-4726-8F95-38C43282F543"
 
     def test_widget_bonus_title_id(self):
         """Test bonus title widget ID."""
@@ -477,3 +471,147 @@ class TestBuildBonusFormWidgets:
         widgets = build_bonus_form_widgets(sheet, "code")
         row = widgets[1]["value"][0]
         assert row[5]["value"] == "50"
+
+
+class TestInsuranceWidgetConstants:
+    """Tests for insurance form widget ID constants."""
+
+    def test_insurance_fee_pair_count(self):
+        """There must be exactly 17 fee pairs."""
+        assert len(INSURANCE_FEE_WIDGET_PAIRS) == 17
+
+    def test_insurance_widget_ids_are_valid(self):
+        """All insurance widget IDs must look like widget IDs."""
+        for name_id, amount_id in INSURANCE_FEE_WIDGET_PAIRS:
+            assert isinstance(name_id, str) and name_id.startswith("widget")
+            assert isinstance(amount_id, str) and amount_id.startswith("widget")
+
+    def test_insurance_widget_constants_exist(self):
+        """The module must expose INS_UNITS_NAME, INS_HEADCOUNT, and 34 fee IDs."""
+        assert hasattr(form_builder_module, "INS_UNITS_NAME")
+        assert hasattr(form_builder_module, "INS_HEADCOUNT")
+        fee_names = [name for name in dir(form_builder_module) if name.startswith("INS_FEE_")]
+        assert len(fee_names) == 34
+
+
+def _make_insurance_row(unit_name: str, headcount: int, fees: list[tuple[str, str]]) -> InsuranceUnitRow:
+    return InsuranceUnitRow(
+        unit_name=unit_name,
+        headcount=headcount,
+        fees=[InsuranceFeeItem(name=name, amount=amount) for name, amount in fees],
+    )
+
+
+class TestBuildInsuranceFormWidgets:
+    """Tests for build_insurance_form_widgets function."""
+
+    def test_returns_four_widgets(self):
+        """Test that exactly four widgets are returned."""
+        sheet = InsuranceSheet(
+            title="测试五险一金",
+            rows=[
+                _make_insurance_row("单位A", 5, [("个人2%", "439.30"), ("缴费合计", "1867.10")])
+            ],
+            maker="张三",
+        )
+        widgets = build_insurance_form_widgets(sheet, "file_code_123")
+        assert len(widgets) == 4
+
+    def test_widget_order(self):
+        """Test widget order: title, detail list, attachment, remark."""
+        sheet = InsuranceSheet(
+            title="测试五险一金",
+            rows=[
+                _make_insurance_row("单位A", 5, [("个人2%", "439.30")])
+            ],
+            maker="张三",
+        )
+        widgets = build_insurance_form_widgets(sheet, "file_code_123")
+        assert widgets[0]["id"] == WIDGET_TITLE
+        assert widgets[1]["id"] == WIDGET_DETAIL_LIST
+        assert widgets[2]["id"] == WIDGET_ATTACHMENT
+        assert widgets[3]["id"] == WIDGET_REMARK
+
+    def test_detail_row_structure(self):
+        """Test each unit row: [单位名称, 参保人数, fee name/amount pairs...]."""
+        sheet = InsuranceSheet(
+            title="测试五险一金",
+            rows=[
+                _make_insurance_row("单位A", 5, [("个人2%", "439.30"), ("缴费合计", "1867.10")])
+            ],
+            maker="张三",
+        )
+        widgets = build_insurance_form_widgets(sheet, "file_code_123")
+        row = widgets[1]["value"][0]
+        assert row[0]["id"] == INS_UNITS_NAME
+        assert row[0]["type"] == "input"
+        assert row[0]["value"] == "单位A"
+        assert row[1]["id"] == INS_HEADCOUNT
+        assert row[1]["type"] == "number"
+        assert row[1]["value"] == 5
+        assert isinstance(row[1]["value"], int)
+        assert row[2]["id"] == INSURANCE_FEE_WIDGET_PAIRS[0][0]
+        assert row[2]["type"] == "input"
+        assert row[2]["value"] == "个人2%"
+        assert row[3]["id"] == INSURANCE_FEE_WIDGET_PAIRS[0][1]
+        assert row[3]["type"] == "amount"
+        assert row[3]["value"] == "439.30"
+        assert len(row) == 2 + 2 * 2
+
+    def test_amounts_are_two_decimal_strings(self):
+        """Test insurance amounts are two-decimal strings."""
+        sheet = InsuranceSheet(
+            title="测试五险一金",
+            rows=[
+                _make_insurance_row("单位A", 5, [("个人2%", "439.30"), ("缴费合计", "1867.10")])
+            ],
+            maker="张三",
+        )
+        widgets = build_insurance_form_widgets(sheet, "file_code_123")
+        row = widgets[1]["value"][0]
+        for fee_widget, amount_widget in zip(row[2::2], row[3::2]):
+            assert isinstance(fee_widget["value"], str)
+            assert isinstance(amount_widget["value"], str)
+            assert amount_widget["value"] in {"439.30", "1867.10"}
+
+    def test_two_units(self):
+        """Test two unit rows produce two detail rows."""
+        sheet = InsuranceSheet(
+            title="测试五险一金",
+            rows=[
+                _make_insurance_row("单位A", 5, [("个人2%", "439.30")]),
+                _make_insurance_row("单位B", 3, [("单位6.5%", "1427.80")]),
+            ],
+            maker="张三",
+        )
+        widgets = build_insurance_form_widgets(sheet, "file_code_123")
+        rows = widgets[1]["value"]
+        assert len(rows) == 2
+        assert rows[0][0]["value"] == "单位A"
+        assert rows[1][0]["value"] == "单位B"
+
+    def test_json_serializable(self):
+        """Test that widget list is JSON serializable."""
+        sheet = InsuranceSheet(
+            title="测试五险一金",
+            rows=[
+                _make_insurance_row("单位A", 5, [("个人2%", "439.30")])
+            ],
+            maker="张三",
+        )
+        widgets = build_insurance_form_widgets(sheet, "file_code_123")
+        json_str = json.dumps(widgets, ensure_ascii=False)
+        parsed = json.loads(json_str)
+        assert len(parsed) == 4
+
+    def test_fee_pair_limit(self):
+        """Test more than 17 fee pairs raises ValueError."""
+        sheet = InsuranceSheet(
+            title="测试五险一金",
+            rows=[
+                _make_insurance_row("单位A", 5, [(f"费用{i}", f"{i}.00") for i in range(1, 19)])
+            ],
+            maker="张三",
+        )
+        with pytest.raises(ValueError, match="费用项超过17项"):
+            build_insurance_form_widgets(sheet, "file_code_123")

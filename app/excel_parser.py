@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation
+from collections import Counter
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
 
@@ -139,7 +140,7 @@ def _extract_total_amount(raw: str) -> str:
 
 
 def _extract_maker(text: str) -> str:
-    """Extract maker name from text like '制表：孙世多'.
+    """Extract maker name from text like '制表：孙世多' or '制表人：张艳艳'.
 
     Args:
         text: Raw cell text from the signature row.
@@ -147,7 +148,7 @@ def _extract_maker(text: str) -> str:
     Returns:
         Maker name string, or empty string if not found.
     """
-    match = re.search(r"制表[：:]\s*(.+)", text.strip())
+    match = re.search(r"制表人?\s*[：:]\s*(.+)", text.strip())
     if match:
         return match.group(1).strip()
     return ""
@@ -979,3 +980,420 @@ def parse_bonus_excel(path: str | Path) -> BonusSheet:
         adjustment_total=adjustment_total,
         warnings=warnings,
     )
+
+
+# ── 五险一金数据模型 ──────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class InsuranceFeeItem:
+    """单个费用对：费用名称 + 金额字符串。"""
+
+    name: str
+    amount: str
+
+
+@dataclass(frozen=True)
+class InsuranceUnitRow:
+    """分单位表的一行数据：单位名称、参保人数、费用对列表。"""
+
+    unit_name: str
+    headcount: int
+    fees: list[InsuranceFeeItem]
+
+
+@dataclass(frozen=True)
+class InsuranceSheet:
+    """解析后的五险一金分单位表。"""
+
+    title: str
+    rows: list[InsuranceUnitRow]
+    maker: str
+    warnings: list[str] = field(default_factory=list)
+
+
+_INSURANCE_EXCLUDED = frozenset({"序号", "单位名称", "人数", "参保人数"})
+
+
+def _insurance_normalize_text(cell: object) -> str:
+    """移除全部空白（含换行）后的表头文本。"""
+    if cell is None:
+        return ""
+    return re.sub(r"\s+", "", str(cell)).strip()
+
+
+def _is_excluded_label(text: str) -> bool:
+    return text in _INSURANCE_EXCLUDED
+
+
+def _find_unit_row(rows: list[list[object]]) -> int | None:
+    for idx, row in enumerate(rows):
+        for cell in row:
+            if _insurance_normalize_text(cell) == "单位名称":
+                return idx
+    return None
+
+
+def _group_label_for_col(header_rows: list[list[object]], name_row_idx: int, col: int, merged_groups: list[tuple[int, int, str]] | None = None) -> str:
+    """金额列的组标签：优先命中合并单元格区间，否则向左查找最近非空组标签。"""
+    group_row_idx = name_row_idx - 1
+    if merged_groups:
+        col0 = col
+        for min_c, max_c, label in merged_groups:
+            if min_c <= col0 <= max_c and label and not _is_excluded_label(label):
+                return label
+    if group_row_idx < 0:
+        return ""
+    above = header_rows[group_row_idx]
+    for c in range(col - 1, -1, -1):
+        if c < len(above):
+            text = _insurance_normalize_text(above[c])
+            if text and not _is_excluded_label(text):
+                return text
+    return ""
+
+
+def _is_insurance_monthly_header(rows: list[list[object]]) -> bool:
+    """人员级表头含 所属单位/姓名/身份证号，一律判False；
+    分单位月度表头需同时出现 单位名称 与 已参保/参保人数。"""
+    for row in rows[:40]:
+        for cell in row:
+            text = _insurance_normalize_text(cell)
+            if text in ("所属单位", "姓名", "身份证号"):
+                return False
+    has_unit = False
+    has_count = False
+    for row in rows[:40]:
+        for cell in row:
+            text = _insurance_normalize_text(cell)
+            if text == "单位名称":
+                has_unit = True
+            if text in ("已参保", "参保人数"):
+                has_count = True
+    return has_unit and has_count
+
+
+def _resolve_insurance_columns(header_rows: list[list[object]], merged_groups: list[tuple[int, int, str]] | None = None) -> tuple[int, int, list[tuple[str, int]]] | None:
+    """解析分单位表头：(单位名称列, 参保人数列, [(组标签, 金额列), ...])。"""
+    unit_row_idx = _find_unit_row(header_rows)
+    if unit_row_idx is None:
+        return None
+    unit_row = header_rows[unit_row_idx]
+    unit_col = None
+    for col, cell in enumerate(unit_row):
+        if _insurance_normalize_text(cell) == "单位名称":
+            unit_col = col
+            break
+    if unit_col is None:
+        return None
+
+    name_row_idx = unit_row_idx + 1
+    if name_row_idx >= len(header_rows):
+        return None
+    name_row = header_rows[name_row_idx]
+
+    headcount_col = None
+    for col, cell in enumerate(name_row):
+        text = _insurance_normalize_text(cell)
+        if text in ("人数", "参保人数"):
+            above_cell = header_rows[unit_row_idx][col] if col < len(header_rows[unit_row_idx]) else None
+            if _insurance_normalize_text(above_cell) == "已参保":
+                headcount_col = col
+                break
+    if headcount_col is None:
+        for col, cell in enumerate(name_row):
+            text = _insurance_normalize_text(cell)
+            if text in ("人数", "参保人数"):
+                headcount_col = col
+                break
+    if headcount_col is None:
+        return None
+
+    money_cols: list[tuple[str, int]] = []
+    for col, cell in enumerate(name_row):
+        text = _insurance_normalize_text(cell)
+        if not text or _is_excluded_label(text):
+            continue
+        group = _group_label_for_col(header_rows, name_row_idx, col, merged_groups)
+        money_cols.append((group, col))
+    if not money_cols:
+        return None
+    return (unit_col, headcount_col, money_cols)
+
+
+def _sheet_merged_group_ranges(path: Path, suffix: str, sheet_name: str | None, sheet_index: int | None, group_row_idx: int) -> list[tuple[int, int, str]]:
+    """返回指定行为合并单元格的组标签区间：(最小列0-based, 最大列0-based, 标签)。"""
+    if group_row_idx < 0:
+        return []
+    if suffix == ".xlsx":
+        import openpyxl
+
+        try:
+            wb = openpyxl.load_workbook(str(path), data_only=False)
+        except Exception:
+            return []
+        try:
+            if sheet_name is not None and sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+            elif sheet_index is not None and 0 <= sheet_index < len(wb.worksheets):
+                ws = wb.worksheets[sheet_index]
+            else:
+                ws = wb.active
+            ranges: list[tuple[int, int, str]] = []
+            target_row = group_row_idx + 1
+            for mr in ws.merged_cells.ranges:
+                if mr.min_row <= target_row <= mr.max_row:
+                    label = ws.cell(mr.min_row, mr.min_col).value
+                    if label is not None and str(label).strip():
+                        ranges.append((mr.min_col - 1, mr.max_col - 1, str(label)))
+            return ranges
+        finally:
+            wb.close()
+    elif suffix == ".xls":
+        import xlrd
+
+        try:
+            wb = xlrd.open_workbook(str(path))
+        except Exception:
+            return []
+        try:
+            if sheet_name is not None:
+                try:
+                    sh = wb.sheet_by_name(sheet_name)
+                except Exception:
+                    sh = wb.sheet_by_index(0)
+            elif sheet_index is not None:
+                try:
+                    sh = wb.sheet_by_index(sheet_index)
+                except Exception:
+                    sh = wb.sheet_by_index(0)
+            else:
+                sh = wb.sheet_by_index(0)
+            ranges = []
+            merged = getattr(sh, "merged_cells", None) or []
+            target_row = group_row_idx
+            for rng in merged:
+                if len(rng) == 4:
+                    r1, r2, c1, c2 = rng
+                    if r1 <= target_row <= r2:
+                        label = sh.cell_value(r1, c1)
+                        if label is not None and str(label).strip():
+                            ranges.append((c1, c2, str(label)))
+            return ranges
+        finally:
+            pass
+    return []
+
+
+def _normalize_insurance_amount(value: object) -> str | None:
+    """空单元格返回None（不提交）；非空金额统一2位小数字符串。"""
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    text, _ = _normalize_numeric(value)
+    if not text:
+        return None
+    return str(Decimal(text).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def list_insurance_sheets(path: str | Path) -> list[SheetInfo]:
+    """返回五险一金分单位表的 sheet 信息，仅标记通过表头识别的有效月度表。"""
+    path = Path(path)
+    suffix = path.suffix.lower()
+    results: list[SheetInfo] = []
+
+    if suffix == ".xlsx":
+        import openpyxl
+
+        try:
+            wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+        except Exception:
+            return results
+        active = wb.active
+        default_name = active.title if active is not None else None
+        for name in wb.sheetnames:
+            ws = wb[name]
+            rows: list[list[object]] = []
+            for i, row in enumerate(ws.iter_rows(values_only=True)):
+                rows.append([str(c) if c is not None else "" for c in row])
+                if i >= 40:
+                    break
+            results.append(
+                SheetInfo(
+                    name=name,
+                    has_valid_header=_is_insurance_monthly_header(rows),
+                    is_default=(name == default_name),
+                )
+            )
+        wb.close()
+    elif suffix == ".xls":
+        import xlrd
+
+        try:
+            wb = xlrd.open_workbook(str(path))
+        except Exception:
+            return results
+        saved_idx = _xls_saved_selected_index(path)
+        nsheets = wb.nsheets
+        if saved_idx is not None and 0 <= saved_idx < nsheets:
+            default_index = saved_idx
+        else:
+            default_index = nsheets - 1
+        for i, name in enumerate(wb.sheet_names()):
+            sh = wb.sheet_by_name(name)
+            rows = [
+                [str(sh.cell_value(r, c)) for c in range(sh.ncols)]
+                for r in range(min(sh.nrows, 41))
+            ]
+            results.append(
+                SheetInfo(
+                    name=name,
+                    has_valid_header=_is_insurance_monthly_header(rows),
+                    is_default=(i == default_index),
+                )
+            )
+    return results
+
+
+def parse_insurance_excel(
+    path: str | Path,
+    sheet_name: str | None = None,
+    sheet_index: int | None = None,
+) -> InsuranceSheet:
+    """解析五险一金分单位Excel，返回 InsuranceSheet。
+
+    规则：
+    - 按表头标签而非列位识别；仅解析第一张通过 _is_insurance_monthly_header 的 sheet，
+      除非调用方指定 sheet_name / sheet_index。
+    - 遇到首格为“合计”的行终止，合计行之后不再解析签批/转账块。
+    - 空金额不生成费用对；非空金额统一2位小数；重复列名加组前缀。
+    - 警告仅描述位置，不回显单元格数值/姓名/证件号。
+    """
+    path = Path(path)
+    suffix = path.suffix.lower()
+
+    if sheet_name is not None:
+        title, all_rows = _read_xls(path, sheet_name=sheet_name) if suffix == ".xls" else _read_xlsx(path, sheet_name=sheet_name)
+    elif sheet_index is not None:
+        title, all_rows = _read_xls(path, sheet_index=sheet_index) if suffix == ".xls" else _read_xlsx(path, sheet_index=sheet_index)
+    else:
+        infos = list_insurance_sheets(path)
+        valid = [s for s in infos if s.has_valid_header]
+        if not valid:
+            raise ValueError("未找到有效分单位表")
+        default = next((s for s in valid if s.is_default), valid[0])
+        title, all_rows = (
+            _read_xls(path, sheet_name=default.name)
+            if suffix == ".xls"
+            else _read_xlsx(path, sheet_name=default.name)
+        )
+
+    header_block = all_rows[:40]
+    unit_row_idx = _find_unit_row(header_block)
+    group_row_idx = unit_row_idx - 1 if unit_row_idx is not None else -1
+    merged_groups = _sheet_merged_group_ranges(path, suffix, sheet_name, sheet_index, group_row_idx) if group_row_idx >= 0 else []
+    resolved = _resolve_insurance_columns(header_block, merged_groups)
+    if resolved is None:
+        raise ValueError("未找到有效分单位表头")
+    unit_col, headcount_col, money_cols = resolved
+    if len(money_cols) > 17:
+        raise ValueError("费用项超过17项，无法提交")
+    unit_row_idx = _find_unit_row(header_block)
+    name_row_idx = unit_row_idx + 1
+    data_start = name_row_idx + 1
+
+    max_col = max(unit_col, headcount_col, max(col for _, col in money_cols))
+
+    # 费用命名：同 sheet 归一化后重名的列名全部加组前缀，否则裸名。
+    normalized_names = [
+        _insurance_normalize_text(header_block[name_row_idx][col])
+        for _, col in money_cols
+    ]
+    name_counts = Counter(normalized_names)
+    fee_names: list[str] = []
+    for (group, col), name in zip(money_cols, normalized_names):
+        if name_counts[name] >= 2:
+            fee_names.append(f"{group}-{name}" if group else name)
+        else:
+            fee_names.append(name)
+
+    rows: list[InsuranceUnitRow] = []
+    warnings: list[str] = []
+    maker = ""
+    total_row_idx: int | None = None
+
+    col_sums = [Decimal(0) for _ in money_cols]
+
+    for idx in range(data_start, len(all_rows)):
+        row = all_rows[idx]
+        while len(row) <= max_col:
+            row.append(None)
+
+        col0_raw = row[0] if len(row) > 0 else None
+        col0_str = _insurance_normalize_text(col0_raw)
+        if col0_str == "合计":
+            total_row_idx = idx
+            break
+
+        if _is_blank_row(row):
+            continue
+
+        unit_name = ""
+        if unit_col < len(row) and row[unit_col] is not None:
+            unit_name = str(row[unit_col]).strip()
+
+        headcount = 0
+        raw_hc = row[headcount_col] if headcount_col < len(row) else None
+        if raw_hc is not None:
+            hc_text = str(raw_hc).strip()
+            if hc_text:
+                try:
+                    headcount = int(float(hc_text))
+                except ValueError:
+                    headcount = 0
+                    warnings.append(f"第{idx + 1}行参保人数非数字")
+            else:
+                warnings.append(f"第{idx + 1}行参保人数为空")
+
+        fees: list[InsuranceFeeItem] = []
+        for i, ((group, col), fee_name) in enumerate(zip(money_cols, fee_names)):
+            raw = row[col] if col < len(row) else None
+            amount = _normalize_insurance_amount(raw)
+            if amount is not None:
+                fees.append(InsuranceFeeItem(name=fee_name, amount=amount))
+                col_sums[i] += Decimal(amount)
+
+        rows.append(InsuranceUnitRow(unit_name=unit_name, headcount=headcount, fees=fees))
+
+    if not rows:
+        raise ValueError("未找到数据行")
+
+    # 合计行逐列校验：不回显数值，仅描述位置。
+    if total_row_idx is not None:
+        total_row = all_rows[total_row_idx]
+        for i, ((group, col), fee_name) in enumerate(zip(money_cols, fee_names)):
+            raw_total = total_row[col] if col < len(total_row) else None
+            total_text = str(raw_total).strip() if raw_total is not None else ""
+            try:
+                total_val = Decimal(total_text) if total_text else None
+            except InvalidOperation:
+                total_val = None
+            if total_val is None:
+                warnings.append(f"第{col + 1}列合计为空")
+            elif col_sums[i] != total_val:
+                warnings.append(f"第{col + 1}列合计与明细不一致")
+
+    # 签批行提取制表人，扫描合计行之后最多8行。
+    if total_row_idx is not None:
+        for subsequent_idx in range(total_row_idx + 1, min(total_row_idx + 9, len(all_rows))):
+            sub_row = all_rows[subsequent_idx]
+            for cell in sub_row:
+                cell_text = str(cell).strip() if cell is not None else ""
+                if "制表" in cell_text:
+                    maker = _extract_maker(cell_text)
+                    break
+            if maker:
+                break
+
+    return InsuranceSheet(title=title, rows=rows, maker=maker, warnings=warnings)

@@ -28,15 +28,17 @@ if _env_path.exists():
 from app.excel_parser import (
     parse_meal_refund_excel,
     parse_bonus_excel,
+    parse_insurance_excel,
     list_sheets,
+    list_insurance_sheets,
     MealRefundSheet,
     BonusSheet,
+    InsuranceSheet,
 )
 from app.form_builder import (
     build_form_widgets,
     build_bonus_form_widgets,
-    APPROVAL_CODE,
-    BONUS_APPROVAL_CODE,
+    build_insurance_form_widgets,
 )
 from app.feishu_api import (
     get_tenant_token,
@@ -93,16 +95,55 @@ if "selected_sheet_name" not in st.session_state:
 # Helper functions
 # ---------------------------------------------------------------------------
 
+def _require_env_code(name: str, label: str) -> str:
+    code = os.getenv(name, "").strip()
+    if not code:
+        raise RuntimeError(f"缺少环境变量 {name}，请在 .env 中配置{label}")
+    return code
+
+
 def get_approval_code(kind: str) -> str:
     """Return the effective approval code for the given kind.
 
-    Reads from environment variables first, falling back to the built-in
-    constants. This ensures env overrides work consistently across sidebar,
-    preview, and submit paths.
+    All approval codes come from environment variables; there are no
+    built-in fallbacks. The legacy FEISHU_APPROVAL_CODE name is still
+    accepted for meal approvals so existing deployments keep working.
     """
     if kind == "bonus":
-        return os.getenv("FEISHU_BONUS_APPROVAL_CODE", BONUS_APPROVAL_CODE)
-    return os.getenv("FEISHU_APPROVAL_CODE", APPROVAL_CODE)
+        return _require_env_code("FEISHU_BONUS_APPROVAL_CODE", "奖金发放审批 Code")
+    if kind == "insurance":
+        return _require_env_code("FEISHU_INSURANCE_APPROVAL_CODE", "五险一金审批 Code")
+
+    meal_code = os.getenv("FEISHU_MEAL_APPROVAL_CODE", "").strip()
+    if meal_code:
+        return meal_code
+
+    legacy_code = os.getenv("FEISHU_APPROVAL_CODE", "").strip()
+    if legacy_code:
+        return legacy_code
+
+    raise RuntimeError(
+        "缺少环境变量 FEISHU_MEAL_APPROVAL_CODE，请在 .env 中配置派遣员工简易费用明细表审批 Code"
+    )
+
+
+def kind_meta(kind: str) -> tuple[str, str]:
+    """Return (label, approval_code) for a given kind.
+
+    All approval codes come from environment variables; there are no
+    built-in fallbacks.
+    """
+    if kind == "bonus":
+        return (
+            "奖金发放审批",
+            _require_env_code("FEISHU_BONUS_APPROVAL_CODE", "奖金发放审批 Code"),
+        )
+    if kind == "insurance":
+        return (
+            "五险一金审批",
+            _require_env_code("FEISHU_INSURANCE_APPROVAL_CODE", "五险一金审批 Code"),
+        )
+    return "派遣员工简易费用明细表审批", get_approval_code(kind)
 
 
 def _reset_sheet_state():
@@ -235,7 +276,7 @@ def render_login_gate() -> bool:
 def render_sidebar():
     """Render sidebar with tool info and environment status."""
     kind = st.session_state.approval_kind
-    kind_label = "派遣员工简易费用明细表审批" if kind == "meal" else "奖金发放审批"
+    kind_label, _ = kind_meta(kind)
     tool_title = f"{kind_label}提交工具"
 
     with st.sidebar:
@@ -289,12 +330,13 @@ def render_step1_upload():
 
     with st.expander("模板下载", expanded=False):
         st.markdown("**模板下载（可直接填写后上传）：**")
-        col_meal, col_unf, col_bonus = st.columns(3)
+        col_meal, col_unf, col_bonus, col_ins = st.columns(4)
 
         templates = [
             (col_meal, "返餐费明细表模板.xlsx"),
             (col_unf, "工会会费明细表模板.xlsx"),
             (col_bonus, "科研业绩津贴明细表模板.xlsx"),
+            (col_ins, "保险审批模板.xlsx"),
         ]
         for col, filename in templates:
             template_path = _PROJECT_ROOT / "templates" / filename
@@ -317,6 +359,8 @@ def render_step1_upload():
     kind = st.session_state.approval_kind
     if kind == "bonus":
         label = "选择奖金明细表（.xls / .xlsx）"
+    elif kind == "insurance":
+        label = "选择五险一金明细表（.xls / .xlsx）"
     else:
         label = "选择返餐费或工会会费明细表（.xls / .xlsx）"
 
@@ -344,25 +388,36 @@ def render_step1_upload():
             st.session_state.uploaded_filename = uploaded_file.name
             st.session_state.submitted = False
 
-            # List sheets for meal kind
-            if kind != "bonus":
+            # List sheets
+            if kind == "bonus":
+                st.session_state.sheet_infos = None
+                st.session_state.selected_sheet_name = None
+            elif kind == "insurance":
                 try:
-                    infos = list_sheets(tmp_file.name)
+                    infos = list_insurance_sheets(tmp_file.name)
                     st.session_state.sheet_infos = infos
-                    # Default sheet = the workbook's own default (.xlsx active / .xls last), as flagged by list_sheets.
                     default = next((s for s in infos if s.is_default), None)
                     if default is not None:
                         st.session_state.selected_sheet_name = default.name
                     else:
-                        # Fallback if nothing flagged (shouldn't happen): first with valid header, else first.
                         valid = [s for s in infos if s.has_valid_header]
                         st.session_state.selected_sheet_name = valid[0].name if valid else (infos[0].name if infos else None)
                 except Exception:
                     st.session_state.sheet_infos = None
                     st.session_state.selected_sheet_name = None
             else:
-                st.session_state.sheet_infos = None
-                st.session_state.selected_sheet_name = None
+                try:
+                    infos = list_sheets(tmp_file.name)
+                    st.session_state.sheet_infos = infos
+                    default = next((s for s in infos if s.is_default), None)
+                    if default is not None:
+                        st.session_state.selected_sheet_name = default.name
+                    else:
+                        valid = [s for s in infos if s.has_valid_header]
+                        st.session_state.selected_sheet_name = valid[0].name if valid else (infos[0].name if infos else None)
+                except Exception:
+                    st.session_state.sheet_infos = None
+                    st.session_state.selected_sheet_name = None
 
         # Sheet selector for meal kind (only if multiple sheets)
         sheet_infos = st.session_state.get("sheet_infos")
@@ -400,6 +455,9 @@ def render_step1_upload():
             try:
                 if kind == "bonus":
                     sheet = parse_bonus_excel(tmp_path)
+                elif kind == "insurance":
+                    selected_name = st.session_state.get("selected_sheet_name")
+                    sheet = parse_insurance_excel(tmp_path, sheet_name=selected_name)
                 else:
                     selected_name = st.session_state.get("selected_sheet_name")
                     sheet = parse_meal_refund_excel(tmp_path, sheet_name=selected_name)
@@ -451,6 +509,14 @@ def render_step2_preview():
                 "个人其他调整": row.adjustment,
                 "实发金额": row.net_amount,
             })
+    elif kind == "insurance":
+        for row in sheet.rows:
+            fee_pairs = "；".join(f"{f.name}={f.amount}" for f in row.fees)
+            data.append({
+                "单位名称": row.unit_name,
+                "参保人数": row.headcount,
+                "费用明细": fee_pairs,
+            })
     else:
         for row in sheet.rows:
             data.append({
@@ -469,6 +535,8 @@ def render_step2_preview():
         st.markdown(f"**个人所得税合计：** {sheet.tax_total}")
         st.markdown(f"**个人其他调整合计：** {sheet.adjustment_total}")
         st.markdown(f"**实发金额合计：** {sheet.net_total}")
+    elif kind == "insurance":
+        pass  # Insurance units carry per-unit fees; no single grand total line.
     else:
         if sheet.total_chinese:
             st.markdown(f"**合计金额：** {sheet.total_amount}（{sheet.total_chinese}）")
@@ -513,7 +581,12 @@ def render_step4_actions():
         return
 
     approval_code = get_approval_code(kind)
-    build_widgets = build_bonus_form_widgets if kind == "bonus" else build_form_widgets
+    if kind == "bonus":
+        build_widgets = build_bonus_form_widgets
+    elif kind == "insurance":
+        build_widgets = build_insurance_form_widgets
+    else:
+        build_widgets = build_form_widgets
 
     col_preview, col_submit = st.columns(2)
 
@@ -634,6 +707,9 @@ def main():
     if kind == "bonus":
         st.title("奖金发放审批提交工具")
         st.markdown("上传奖金明细表，自动解析并提交飞书审批流程。")
+    elif kind == "insurance":
+        st.title("五险一金审批提交工具")
+        st.markdown("上传五险一金分单位明细表，自动解析并提交飞书审批流程。")
     else:
         st.title("派遣员工简易费用明细表审批提交工具")
         st.markdown("适用于手工制作的退返餐费、工会会费等简易费用表。表中除序号、姓名、身份证号外，仅设一列金额，表格末尾为合计金额。审批顺序：夏璠→张宇佳→蒿敬恪。")
@@ -647,10 +723,15 @@ def main():
     # Approval type selector
     kind_label = st.radio(
         "审批类型",
-        ["派遣员工简易费用明细表审批", "奖金发放审批"],
+        ["派遣员工简易费用明细表审批", "奖金发放审批", "五险一金审批"],
         horizontal=True,
     )
-    new_kind = "meal" if kind_label == "派遣员工简易费用明细表审批" else "bonus"
+    if kind_label == "派遣员工简易费用明细表审批":
+        new_kind = "meal"
+    elif kind_label == "奖金发放审批":
+        new_kind = "bonus"
+    else:
+        new_kind = "insurance"
     if new_kind != st.session_state.approval_kind:
         st.session_state.approval_kind = new_kind
         _reset_sheet_state()
