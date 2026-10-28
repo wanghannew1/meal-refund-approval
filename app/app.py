@@ -84,6 +84,8 @@ if "approval_kind" not in st.session_state:
     st.session_state.approval_kind = "meal"
 if "uploaded_filename" not in st.session_state:
     st.session_state.uploaded_filename = None
+if "uploaded_file_sig" not in st.session_state:
+    st.session_state.uploaded_file_sig = None
 if "name_lookup_failed" not in st.session_state:
     st.session_state.name_lookup_failed = False
 if "sheet_infos" not in st.session_state:
@@ -146,14 +148,24 @@ def kind_meta(kind: str) -> tuple[str, str]:
     return "派遣员工简易费用明细表审批", get_approval_code(kind)
 
 
-def _reset_sheet_state():
-    """Reset uploaded-sheet state when switching approval kind."""
-    _cleanup_tmp_file()
+def _reset_preview_state():
+    """Clear parsed sheet + editable title/remark widget state."""
     st.session_state.sheet = None
     st.session_state.title = ""
     st.session_state.remark = ""
     st.session_state.submitted = False
+    # Widget keys must be removed too; otherwise Streamlit keeps the old
+    # text_input/text_area display even though session values were reset.
+    st.session_state.pop("title_input", None)
+    st.session_state.pop("remark_input", None)
+
+
+def _reset_sheet_state():
+    """Reset uploaded-sheet state when switching approval kind."""
+    _cleanup_tmp_file()
+    _reset_preview_state()
     st.session_state.uploaded_filename = None
+    st.session_state.uploaded_file_sig = None
     st.session_state.sheet_infos = None
     st.session_state.selected_sheet_name = None
 
@@ -370,106 +382,115 @@ def render_step1_upload():
         st.caption("返餐费与工会会费共用此上传入口和审批流程：两种模板均自动识别（返餐费末行『总计』，工会会费末行『合计』；工会会费多出的合计列自动忽略）。支持含/不含身份证号列的表格。")
         st.caption("多工作表默认规则：.xlsx 与 .xls 均默认读取保存时选中的工作表（.xls 无法识别时取最后一张）；上传后可通过工作表选择器手动切换。")
 
-    if uploaded_file is not None:
-        # Detect if this is a new upload (different from what's cached)
-        current_tmp = st.session_state.get("tmp_file_path")
-        is_new_upload = (
-            current_tmp is None
-            or Path(current_tmp).name != uploaded_file.name
-            or not Path(current_tmp).exists()
-        )
+    if uploaded_file is None:
+        _reset_sheet_state()
+        return
 
-        if is_new_upload:
-            _cleanup_tmp_file()
-            tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix)
-            tmp_file.write(uploaded_file.getvalue())
-            tmp_file.close()
-            st.session_state.tmp_file_path = tmp_file.name
-            st.session_state.uploaded_filename = uploaded_file.name
-            st.session_state.submitted = False
+    # Stable signature for the current upload. Streamlit returns the same
+    # UploadedFile across reruns; a newly chosen file gets a new file_id.
+    file_id = getattr(uploaded_file, "file_id", None)
+    file_size = getattr(uploaded_file, "size", None)
+    upload_sig = f"{uploaded_file.name}:{file_size}:{file_id}"
 
-            # List sheets
-            if kind == "bonus":
+    current_tmp = st.session_state.get("tmp_file_path")
+    is_new_upload = (
+        current_tmp is None
+        or not Path(current_tmp).exists()
+        or st.session_state.get("uploaded_file_sig") != upload_sig
+    )
+
+    if is_new_upload:
+        # Clear the previous sheet/title/remark before parsing the new file.
+        # Without this, step 2 keeps showing the old preview because
+        # st.session_state.sheet is still populated.
+        _reset_sheet_state()
+        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix)
+        tmp_file.write(uploaded_file.getvalue())
+        tmp_file.close()
+        st.session_state.tmp_file_path = tmp_file.name
+        st.session_state.uploaded_filename = uploaded_file.name
+        st.session_state.uploaded_file_sig = upload_sig
+        st.session_state.submitted = False
+
+        # List sheets
+        if kind == "bonus":
+            st.session_state.sheet_infos = None
+            st.session_state.selected_sheet_name = None
+        elif kind == "insurance":
+            try:
+                infos = list_insurance_sheets(tmp_file.name)
+                st.session_state.sheet_infos = infos
+                default = next((s for s in infos if s.is_default), None)
+                if default is not None:
+                    st.session_state.selected_sheet_name = default.name
+                else:
+                    valid = [s for s in infos if s.has_valid_header]
+                    st.session_state.selected_sheet_name = valid[0].name if valid else (infos[0].name if infos else None)
+            except Exception:
                 st.session_state.sheet_infos = None
                 st.session_state.selected_sheet_name = None
-            elif kind == "insurance":
-                try:
-                    infos = list_insurance_sheets(tmp_file.name)
-                    st.session_state.sheet_infos = infos
-                    default = next((s for s in infos if s.is_default), None)
-                    if default is not None:
-                        st.session_state.selected_sheet_name = default.name
-                    else:
-                        valid = [s for s in infos if s.has_valid_header]
-                        st.session_state.selected_sheet_name = valid[0].name if valid else (infos[0].name if infos else None)
-                except Exception:
-                    st.session_state.sheet_infos = None
-                    st.session_state.selected_sheet_name = None
-            else:
-                try:
-                    infos = list_sheets(tmp_file.name)
-                    st.session_state.sheet_infos = infos
-                    default = next((s for s in infos if s.is_default), None)
-                    if default is not None:
-                        st.session_state.selected_sheet_name = default.name
-                    else:
-                        valid = [s for s in infos if s.has_valid_header]
-                        st.session_state.selected_sheet_name = valid[0].name if valid else (infos[0].name if infos else None)
-                except Exception:
-                    st.session_state.sheet_infos = None
-                    st.session_state.selected_sheet_name = None
-
-        # Sheet selector for meal kind (only if multiple sheets)
-        sheet_infos = st.session_state.get("sheet_infos")
-        if kind != "bonus" and sheet_infos and len(sheet_infos) > 1:
-            options = []
-            for si in sheet_infos:
-                suffix_label = " （含表头）" if si.has_valid_header else ""
-                options.append(f"{si.name}{suffix_label}")
-            current_name = st.session_state.get("selected_sheet_name") or ""
-            # Find current index
-            current_idx = 0
-            for i, si in enumerate(sheet_infos):
-                if si.name == current_name:
-                    current_idx = i
-                    break
-            selected_label = st.selectbox(
-                "选择工作表",
-                options=options,
-                index=current_idx,
-                key="sheet_selector",
-                help=".xlsx 与 .xls 默认读取保存时选中的工作表（.xls 无法识别时取最后一张）。可随时切换，切换后自动重新解析。",
-            )
-            # Extract name from label (strip suffix)
-            new_name = selected_label.replace(" （含表头）", "")
-            if new_name != st.session_state.get("selected_sheet_name"):
-                st.session_state.selected_sheet_name = new_name
-                st.session_state.sheet = None
-                st.session_state.title = ""
-                st.session_state.remark = ""
-                st.session_state.submitted = False
-
-        # Parse the file
-        tmp_path = st.session_state.get("tmp_file_path")
-        if tmp_path and Path(tmp_path).exists() and st.session_state.sheet is None:
+        else:
             try:
-                if kind == "bonus":
-                    sheet = parse_bonus_excel(tmp_path)
-                elif kind == "insurance":
-                    selected_name = st.session_state.get("selected_sheet_name")
-                    sheet = parse_insurance_excel(tmp_path, sheet_name=selected_name)
+                infos = list_sheets(tmp_file.name)
+                st.session_state.sheet_infos = infos
+                default = next((s for s in infos if s.is_default), None)
+                if default is not None:
+                    st.session_state.selected_sheet_name = default.name
                 else:
-                    selected_name = st.session_state.get("selected_sheet_name")
-                    sheet = parse_meal_refund_excel(tmp_path, sheet_name=selected_name)
-                st.session_state.sheet = sheet
-                st.session_state.title = sheet.title
-                st.success(f"解析成功：共 {len(sheet.rows)} 行数据")
-            except ValueError as e:
-                st.session_state.sheet = None
-                _render_error_with_traceback(f"解析失败：{e}", e)
-            except Exception as e:
-                st.session_state.sheet = None
-                _render_error_with_traceback(f"解析失败：{e}", e)
+                    valid = [s for s in infos if s.has_valid_header]
+                    st.session_state.selected_sheet_name = valid[0].name if valid else (infos[0].name if infos else None)
+            except Exception:
+                st.session_state.sheet_infos = None
+                st.session_state.selected_sheet_name = None
+
+    # Sheet selector for meal kind (only if multiple sheets)
+    sheet_infos = st.session_state.get("sheet_infos")
+    if kind != "bonus" and sheet_infos and len(sheet_infos) > 1:
+        options = []
+        for si in sheet_infos:
+            suffix_label = " （含表头）" if si.has_valid_header else ""
+            options.append(f"{si.name}{suffix_label}")
+        current_name = st.session_state.get("selected_sheet_name") or ""
+        # Find current index
+        current_idx = 0
+        for i, si in enumerate(sheet_infos):
+            if si.name == current_name:
+                current_idx = i
+                break
+        selected_label = st.selectbox(
+            "选择工作表",
+            options=options,
+            index=current_idx,
+            key="sheet_selector",
+            help=".xlsx 与 .xls 默认读取保存时选中的工作表（.xls 无法识别时取最后一张）。可随时切换，切换后自动重新解析。",
+        )
+        # Extract name from label (strip suffix)
+        new_name = selected_label.replace(" （含表头）", "")
+        if new_name != st.session_state.get("selected_sheet_name"):
+            st.session_state.selected_sheet_name = new_name
+            _reset_preview_state()
+
+    # Parse the file
+    tmp_path = st.session_state.get("tmp_file_path")
+    if tmp_path and Path(tmp_path).exists() and st.session_state.sheet is None:
+        try:
+            if kind == "bonus":
+                sheet = parse_bonus_excel(tmp_path)
+            elif kind == "insurance":
+                selected_name = st.session_state.get("selected_sheet_name")
+                sheet = parse_insurance_excel(tmp_path, sheet_name=selected_name)
+            else:
+                selected_name = st.session_state.get("selected_sheet_name")
+                sheet = parse_meal_refund_excel(tmp_path, sheet_name=selected_name)
+            st.session_state.sheet = sheet
+            st.session_state.title = sheet.title
+            st.success(f"解析成功：共 {len(sheet.rows)} 行数据")
+        except ValueError as e:
+            st.session_state.sheet = None
+            _render_error_with_traceback(f"解析失败：{e}", e)
+        except Exception as e:
+            st.session_state.sheet = None
+            _render_error_with_traceback(f"解析失败：{e}", e)
 
 
 # ---------------------------------------------------------------------------
@@ -487,7 +508,7 @@ def render_step2_preview():
     kind = st.session_state.approval_kind
 
     # Editable title
-    title = st.text_input("审批标题", value=st.session_state.title)
+    title = st.text_input("审批标题", value=st.session_state.title, key="title_input")
     st.session_state.title = title
 
     st.divider()
@@ -562,7 +583,7 @@ def render_step3_remark():
     sheet = st.session_state.sheet
     default_remark = f"制表：{sheet.maker}" if sheet and sheet.maker else ""
 
-    remark = st.text_area("备注（可选）", value=st.session_state.remark or default_remark)
+    remark = st.text_area("备注（可选）", value=st.session_state.remark or default_remark, key="remark_input")
     st.session_state.remark = remark
 
 
