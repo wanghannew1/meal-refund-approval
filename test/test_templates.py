@@ -220,12 +220,11 @@ class TestInsuranceTemplates:
         assert len(sheet.rows) == 1
         assert sheet.rows[0].headcount == 5
         names = [f.name for f in sheet.rows[0].fees]
-        assert "已参保-单位12%" in names
-        assert "已参保-个人8%" in names
-        assert "已参保-合计" in names
-        assert "补收-合计" in names
-        assert "转款金额-单位12%" in names
-        assert "转款金额-合计" in names
+        assert names == [
+            "已参保-单位12%", "已参保-个人8%", "已参保-合计",
+            "转款金额-单位12%", "转款金额-个人8%", "转款金额-合计",
+        ]
+        assert sheet.warnings == []
         assert sheet.maker == "张三"
 
     def test_social_template_parses(self):

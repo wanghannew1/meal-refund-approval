@@ -1035,16 +1035,19 @@ def _find_unit_row(rows: list[list[object]]) -> int | None:
 
 
 def _group_label_for_col(header_rows: list[list[object]], name_row_idx: int, col: int, merged_groups: list[tuple[int, int, str]] | None = None) -> str:
-    """金额列的组标签：优先命中合并单元格区间，否则向左查找最近非空组标签。"""
+    """金额列的组标签：优先命中合并单元格区间，其次同列组标签，最后向左查找。"""
     group_row_idx = name_row_idx - 1
     if merged_groups:
-        col0 = col
         for min_c, max_c, label in merged_groups:
-            if min_c <= col0 <= max_c and label and not _is_excluded_label(label):
+            if min_c <= col <= max_c and label and not _is_excluded_label(label):
                 return label
     if group_row_idx < 0:
         return ""
     above = header_rows[group_row_idx]
+    if col < len(above):
+        same_col = _insurance_normalize_text(above[col])
+        if same_col and not _is_excluded_label(same_col):
+            return same_col
     for c in range(col - 1, -1, -1):
         if c < len(above):
             text = _insurance_normalize_text(above[c])
@@ -1291,7 +1294,7 @@ def parse_insurance_excel(
 
     header_block = all_rows[:40]
     unit_row_idx = _find_unit_row(header_block)
-    group_row_idx = unit_row_idx - 1 if unit_row_idx is not None else -1
+    group_row_idx = unit_row_idx if unit_row_idx is not None else -1
     merged_groups = _sheet_merged_group_ranges(path, suffix, sheet_name, sheet_index, group_row_idx) if group_row_idx >= 0 else []
     resolved = _resolve_insurance_columns(header_block, merged_groups)
     if resolved is None:
@@ -1380,7 +1383,8 @@ def parse_insurance_excel(
             except InvalidOperation:
                 total_val = None
             if total_val is None:
-                warnings.append(f"第{col + 1}列合计为空")
+                if col_sums[i] != 0:
+                    warnings.append(f"第{col + 1}列合计为空")
             elif col_sums[i] != total_val:
                 warnings.append(f"第{col + 1}列合计与明细不一致")
 
