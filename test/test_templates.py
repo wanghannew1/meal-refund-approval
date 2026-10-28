@@ -233,12 +233,11 @@ class TestInsuranceTemplates:
         assert len(sheet.rows) == 1
         assert sheet.rows[0].headcount == 5
         names = [f.name for f in sheet.rows[0].fees]
-        assert "养老小计（单位+个人）" in names
-        assert "失业小计（单位+个人）" in names
-        assert "已参保-合计" in names
-        assert "养老小计" in names
-        assert "失业小计" in names
-        assert "转款金额-合计" in names
+        assert names == [
+            "已参保-养老小计（单位+个人）", "已参保-失业小计（单位+个人）", "已参保-合计",
+            "转款金额-养老小计", "转款金额-失业小计", "转款金额-合计",
+        ]
+        assert sheet.warnings == []
         assert sheet.maker == "张三"
 
     def test_templates_have_no_real_pii(self):

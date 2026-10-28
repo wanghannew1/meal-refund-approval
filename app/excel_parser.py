@@ -1313,11 +1313,15 @@ def parse_insurance_excel(
         _insurance_normalize_text(header_block[name_row_idx][col])
         for _, col in money_cols
     ]
+    merged_group_cols: set[int] = set()
+    for min_c, max_c, label in merged_groups:
+        if label and not _is_excluded_label(label):
+            merged_group_cols.update(range(min_c, max_c + 1))
     name_counts = Counter(normalized_names)
     fee_names: list[str] = []
     for (group, col), name in zip(money_cols, normalized_names):
-        if name_counts[name] >= 2:
-            fee_names.append(f"{group}-{name}" if group else name)
+        if group and (col in merged_group_cols or name_counts[name] >= 2):
+            fee_names.append(f"{group}-{name}")
         else:
             fee_names.append(name)
 

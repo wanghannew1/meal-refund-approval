@@ -1582,28 +1582,34 @@ class TestRealFixtureThreeCol:
 
 class _InsuranceWorkbook:
     @staticmethod
-    def make(tmp_path: Path, rows: list[list[object]], sheet_name: str = "Sheet1") -> Path:
+    def make(tmp_path: Path, rows: list[list[object]], sheet_name: str = "Sheet1", merges: tuple[str, ...] = ()) -> Path:
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = sheet_name
         for r, row in enumerate(rows, start=1):
             for c, val in enumerate(row, start=1):
                 ws.cell(row=r, column=c, value=val)
+        for rng in merges:
+            ws.merge_cells(rng)
         fp = tmp_path / f"{sheet_name}.xlsx"
         wb.save(fp)
         return fp
 
 
 class TestInsuranceHeaderDetection:
-    def _final_names(self, resolved, rows):
+    def _final_names(self, resolved, rows, merged_groups=None):
         unit_row_idx = _find_unit_row(rows)
         name_row_idx = unit_row_idx + 1
         normalized = [
             _insurance_normalize_text(rows[name_row_idx][col]) for _, col in resolved[2]
         ]
+        merged_cols: set[int] = set()
+        for min_c, max_c, label in (merged_groups or []):
+            if label and label not in {"序号", "单位名称", "人数", "参保人数"}:
+                merged_cols.update(range(min_c, max_c + 1))
         counts = Counter(normalized)
         return [
-            f"{group}-{name}" if counts[name] >= 2 and group else name
+            f"{group}-{name}" if group and (col in merged_cols or counts[name] >= 2) else name
             for (group, col), name in zip(resolved[2], normalized)
         ]
 
@@ -1660,7 +1666,7 @@ class TestInsuranceHeaderDetection:
         ]
         resolved = _resolve_insurance_columns(rows, [(2, 7, "已参保"), (8, 11, "补收"), (12, 16, "转款金额")])
         assert resolved is not None
-        cols = self._final_names(resolved, rows)
+        cols = self._final_names(resolved, rows, [(2, 7, "已参保"), (8, 11, "补收"), (12, 16, "转款金额")])
         assert len(cols) == 13
         names = set(cols)
         assert names == {
@@ -1678,30 +1684,30 @@ class TestInsuranceHeaderDetection:
         ]
         resolved = _resolve_insurance_columns(rows, [(2, 5, "已参保"), (6, 8, "转款金额")])
         assert resolved is not None
-        cols = self._final_names(resolved, rows)
+        cols = self._final_names(resolved, rows, [(2, 5, "已参保"), (6, 8, "转款金额")])
         assert len(cols) == 6
         names = set(cols)
         assert names == {
-            "养老小计（单位+个人）", "失业小计（单位+个人）", "已参保-合计",
-            "养老小计", "失业小计", "转款金额-合计",
+            "已参保-养老小计（单位+个人）", "已参保-失业小计（单位+个人）", "已参保-合计",
+            "转款金额-养老小计", "转款金额-失业小计", "转款金额-合计",
         }
 
     def test_social_security_9月_header_true(self, tmp_path):
         rows = [
             ["白城分公司2026年9月社保转款明细", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
             ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
-            ["序号", "单位名称", "已参保", "", "", "", "基数调整补缴7-8月", "", "", "", "转款金额", "", "", "", "", "", "", "", ""],
+            ["序号", "单位名称", "已参保", "", "", "", "基数调整补缴7-8月", "", "", "转款金额", "", "", "", "", "", "", "", ""],
             ["", "", "人数", "养老小计（单位+个人）", "失业小计（单位+个人）", "合计", "养老小计（单位+个人）", "失业小计（单位+个人）", "合计", "养老小计", "失业小计", "合计", "", "", "", "", "", "", ""],
         ]
         resolved = _resolve_insurance_columns(rows, [(2, 5, "已参保"), (6, 8, "基数调整补缴7-8月"), (9, 11, "转款金额")])
         assert resolved is not None
-        cols = self._final_names(resolved, rows)
+        cols = self._final_names(resolved, rows, [(2, 5, "已参保"), (6, 8, "基数调整补缴7-8月"), (9, 11, "转款金额")])
         assert len(cols) == 9
         names = set(cols)
         assert names == {
             "已参保-养老小计（单位+个人）", "已参保-失业小计（单位+个人）", "已参保-合计",
             "基数调整补缴7-8月-养老小计（单位+个人）", "基数调整补缴7-8月-失业小计（单位+个人）", "基数调整补缴7-8月-合计",
-            "养老小计", "失业小计", "转款金额-合计",
+            "转款金额-养老小计", "转款金额-失业小计", "转款金额-合计",
         }
 
     def test_personnel_header_false(self, tmp_path):
@@ -1767,8 +1773,8 @@ class TestInsuranceHeaderDetection:
 
 
 class TestParseInsuranceExcel:
-    def _parse(self, tmp_path: Path, rows: list[list[object]]):
-        fp = _InsuranceWorkbook.make(tmp_path, rows)
+    def _parse(self, tmp_path: Path, rows: list[list[object]], merges: tuple[str, ...] = ()):
+        fp = _InsuranceWorkbook.make(tmp_path, rows, merges=merges)
         return parse_insurance_excel(fp)
 
     def test_medical_base_empty_amount_skipped(self, tmp_path):
@@ -1800,7 +1806,7 @@ class TestParseInsuranceExcel:
             ["合计", "", "5", "1184", "1776", "0", "0", "2960", "0", "0", "0", "0", "1184", "1776", "0", "0", "2960", "", ""],
             ["总经理审批：", "财务审核：", "制表：  张艳艳", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
         ]
-        sheet = self._parse(tmp_path, rows)
+        sheet = self._parse(tmp_path, rows, merges=("C3:H3", "I3:L3", "M3:Q3"))
         assert len(sheet.rows) == 1
         assert sheet.rows[0].headcount == 5
         assert len(sheet.rows[0].fees) == 6
@@ -1823,11 +1829,11 @@ class TestParseInsuranceExcel:
             ["合计", "", "5", "5271.85", "219.65", "5491.5", "5271.85", "219.65", "5491.5", "", ""],
             ["总经理审批：", "财务审核：", "制表：  张艳艳", "", "", "", "", "", "", ""],
         ]
-        sheet = self._parse(tmp_path, rows)
+        sheet = self._parse(tmp_path, rows, merges=("C3:F3", "G3:I3"))
         assert len(sheet.rows[0].fees) == 6
         assert [f.name for f in sheet.rows[0].fees] == [
-            "养老小计（单位+个人）", "失业小计（单位+个人）", "已参保-合计",
-            "养老小计", "失业小计", "转款金额-合计",
+            "已参保-养老小计（单位+个人）", "已参保-失业小计（单位+个人）", "已参保-合计",
+            "转款金额-养老小计", "转款金额-失业小计", "转款金额-合计",
         ]
         assert [f.amount for f in sheet.rows[0].fees] == [
             "5271.85", "219.65", "5491.50", "5271.85", "219.65", "5491.50",
@@ -1837,14 +1843,19 @@ class TestParseInsuranceExcel:
         rows = [
             ["白城分公司2026年9月社保转款明细", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
             ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
-            ["序号", "单位名称", "已参保", "", "", "", "基数调整补缴7-8月", "", "", "", "转款金额", "", "", "", "", "", "", "", ""],
+            ["序号", "单位名称", "已参保", "", "", "", "基数调整补缴7-8月", "", "", "转款金额", "", "", "", "", "", "", "", ""],
             ["", "", "人数", "养老小计（单位+个人）", "失业小计（单位+个人）", "合计", "养老小计（单位+个人）", "失业小计（单位+个人）", "合计", "养老小计", "失业小计", "合计", "", "", "", "", "", "", ""],
             ["1", "白城市洮北区公路管理段", "5", "5386.65", "224.45", "5611.1", "229.6", "9.6", "239.2", "5616.25", "234.05", "5850.3", "", "", "", "", "", "", ""],
             ["合计", "", "5", "5386.65", "224.45", "5611.1", "229.6", "9.6", "239.2", "5616.25", "234.05", "5850.3", "", "", "", "", "", "", ""],
             ["总经理审批：", "分管领导审核：", "财务审核：", "业务审核：", "制表人：张艳艳", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
         ]
-        sheet = self._parse(tmp_path, rows)
+        sheet = self._parse(tmp_path, rows, merges=("C3:F3", "G3:I3", "J3:L3"))
         assert len(sheet.rows[0].fees) == 9
+        assert [f.name for f in sheet.rows[0].fees] == [
+            "已参保-养老小计（单位+个人）", "已参保-失业小计（单位+个人）", "已参保-合计",
+            "基数调整补缴7-8月-养老小计（单位+个人）", "基数调整补缴7-8月-失业小计（单位+个人）", "基数调整补缴7-8月-合计",
+            "转款金额-养老小计", "转款金额-失业小计", "转款金额-合计",
+        ]
         assert sheet.rows[0].headcount == 5
         assert sheet.maker == "张艳艳"
 
