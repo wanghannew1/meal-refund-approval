@@ -133,7 +133,9 @@ def _extract_total_amount(raw: str) -> str:
     cleaned = re.sub(r"[￥$：:,\s]", "", raw.strip())
     # Try to parse as number
     try:
-        d = Decimal(cleaned)
+        d = Decimal(cleaned).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
         if d == d.to_integral_value():
             return str(int(d))
         return str(d.normalize())
