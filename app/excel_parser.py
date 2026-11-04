@@ -71,11 +71,14 @@ def _normalize_numeric(value: object) -> tuple[str, bool]:
         # xlrd returns numeric cells as floats (1.0, 1860.0)
         if value == int(value):
             return str(int(value)), True
-        # Has fractional part — format without trailing zeros
-        d = Decimal(str(value))
-        normalized = d.normalize()
-        # Ensure at least integer form
-        return str(normalized), True
+        # Has fractional part — quantize to 2 decimals to avoid floating
+        # point noise such as 49.999999999999986, then drop trailing zeros.
+        d = Decimal(str(value)).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        if d == d.to_integral_value():
+            return str(int(d)), True
+        return str(d.normalize()), True
     if isinstance(value, int):
         return str(value), False
     if isinstance(value, str):
