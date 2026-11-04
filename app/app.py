@@ -88,6 +88,10 @@ if "uploaded_file_sig" not in st.session_state:
     st.session_state.uploaded_file_sig = None
 if "name_lookup_failed" not in st.session_state:
     st.session_state.name_lookup_failed = False
+if "batch_items" not in st.session_state:
+    st.session_state.batch_items = []
+if "batch_submitting" not in st.session_state:
+    st.session_state.batch_submitting = False
 if "sheet_infos" not in st.session_state:
     st.session_state.sheet_infos = None
 if "selected_sheet_name" not in st.session_state:
@@ -164,10 +168,23 @@ def _reset_sheet_state():
     """Reset uploaded-sheet state when switching approval kind."""
     _cleanup_tmp_file()
     _reset_preview_state()
+    _clear_batch_items()
     st.session_state.uploaded_filename = None
     st.session_state.uploaded_file_sig = None
     st.session_state.sheet_infos = None
     st.session_state.selected_sheet_name = None
+
+
+def _clear_batch_items():
+    """清理所有批量上传状态及其临时文件。"""
+    for item in st.session_state.batch_items:
+        tmp_path = item.get("tmp_path")
+        if tmp_path and Path(tmp_path).exists():
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+    st.session_state.batch_items = []
 
 
 def _get_token() -> str:
@@ -332,11 +349,10 @@ def render_sidebar():
 # Step 1: Upload Excel
 # ---------------------------------------------------------------------------
 def render_step1_upload():
-    """Render Step 1: Upload and parse Excel file.
+    """Render Step 1: Upload and parse Excel file(s).
 
-    Includes a template download section (two sanitized .xlsx templates)
-    above the file uploader, so users can grab a blank form directly from
-    the page instead of receiving it out-of-band.
+    Supports multi-file upload for all approval kinds. Each Excel file is
+    parsed into one approval item stored in ``st.session_state.batch_items``.
     """
     st.subheader("步骤 1：上传表格")
 
@@ -370,127 +386,82 @@ def render_step1_upload():
 
     kind = st.session_state.approval_kind
     if kind == "bonus":
-        label = "选择奖金明细表（.xls / .xlsx）"
+        label = "选择奖金明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）"
     elif kind == "insurance":
-        label = "选择五险一金明细表（.xls / .xlsx）"
+        label = "选择五险一金明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）"
     else:
-        label = "选择返餐费或工会会费明细表（.xls / .xlsx）"
+        label = "选择返餐费或工会会费明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）"
 
-    uploaded_file = st.file_uploader(label, type=["xls", "xlsx"])
+    uploaded_files = st.file_uploader(label, type=["xls", "xlsx"], accept_multiple_files=True)
 
-    if kind != "bonus":
-        st.caption("返餐费与工会会费共用此上传入口和审批流程：两种模板均自动识别（返餐费末行『总计』，工会会费末行『合计』；工会会费多出的合计列自动忽略）。支持含/不含身份证号列的表格。")
-        st.caption("多工作表默认规则：.xlsx 与 .xls 均默认读取保存时选中的工作表（.xls 无法识别时取最后一张）；上传后可通过工作表选择器手动切换。")
+    st.caption("每个 Excel 文件会被解析为独立的审批单，提交时逐个生成飞书审批实例。")
 
-    if uploaded_file is None:
-        _reset_sheet_state()
+    if not uploaded_files:
+        _clear_batch_items()
         return
 
-    # Stable signature for the current upload. Streamlit returns the same
-    # UploadedFile across reruns; a newly chosen file gets a new file_id.
-    file_id = getattr(uploaded_file, "file_id", None)
-    file_size = getattr(uploaded_file, "size", None)
-    upload_sig = f"{uploaded_file.name}:{file_size}:{file_id}"
+    # 计算当前上传的文件签名，用于检测文件集合是否变化
+    current_sigs = [
+        f"{f.name}:{getattr(f, 'size', None)}:{getattr(f, 'file_id', None)}"
+        for f in uploaded_files
+    ]
+    existing_sigs = [item.get("file_sig") for item in st.session_state.batch_items]
 
-    current_tmp = st.session_state.get("tmp_file_path")
-    is_new_upload = (
-        current_tmp is None
-        or not Path(current_tmp).exists()
-        or st.session_state.get("uploaded_file_sig") != upload_sig
-    )
+    if current_sigs != existing_sigs:
+        # 文件集合变化，先清理旧状态再重新解析全部
+        _clear_batch_items()
+        for uploaded_file in uploaded_files:
+            file_sig = (
+                f"{uploaded_file.name}:{getattr(uploaded_file, 'size', None)}:"
+                f"{getattr(uploaded_file, 'file_id', None)}"
+            )
+            tmp_file = tempfile.NamedTemporaryFile(
+                delete=False, suffix=Path(uploaded_file.name).suffix
+            )
+            tmp_file.write(uploaded_file.getvalue())
+            tmp_file.close()
 
-    if is_new_upload:
-        # Clear the previous sheet/title/remark before parsing the new file.
-        # Without this, step 2 keeps showing the old preview because
-        # st.session_state.sheet is still populated.
-        _reset_sheet_state()
-        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix)
-        tmp_file.write(uploaded_file.getvalue())
-        tmp_file.close()
-        st.session_state.tmp_file_path = tmp_file.name
-        st.session_state.uploaded_filename = uploaded_file.name
-        st.session_state.uploaded_file_sig = upload_sig
-        st.session_state.submitted = False
-
-        # List sheets
-        if kind == "bonus":
-            st.session_state.sheet_infos = None
-            st.session_state.selected_sheet_name = None
-        elif kind == "insurance":
             try:
-                infos = list_insurance_sheets(tmp_file.name)
-                st.session_state.sheet_infos = infos
-                default = next((s for s in infos if s.is_default), None)
-                if default is not None:
-                    st.session_state.selected_sheet_name = default.name
+                if kind == "bonus":
+                    sheet = parse_bonus_excel(tmp_file.name)
+                elif kind == "insurance":
+                    sheet = parse_insurance_excel(tmp_file.name)
                 else:
-                    valid = [s for s in infos if s.has_valid_header]
-                    st.session_state.selected_sheet_name = valid[0].name if valid else (infos[0].name if infos else None)
-            except Exception:
-                st.session_state.sheet_infos = None
-                st.session_state.selected_sheet_name = None
-        else:
-            try:
-                infos = list_sheets(tmp_file.name)
-                st.session_state.sheet_infos = infos
-                default = next((s for s in infos if s.is_default), None)
-                if default is not None:
-                    st.session_state.selected_sheet_name = default.name
-                else:
-                    valid = [s for s in infos if s.has_valid_header]
-                    st.session_state.selected_sheet_name = valid[0].name if valid else (infos[0].name if infos else None)
-            except Exception:
-                st.session_state.sheet_infos = None
-                st.session_state.selected_sheet_name = None
-
-    # Sheet selector for meal kind (only if multiple sheets)
-    sheet_infos = st.session_state.get("sheet_infos")
-    if kind != "bonus" and sheet_infos and len(sheet_infos) > 1:
-        options = []
-        for si in sheet_infos:
-            suffix_label = " （含表头）" if si.has_valid_header else ""
-            options.append(f"{si.name}{suffix_label}")
-        current_name = st.session_state.get("selected_sheet_name") or ""
-        # Find current index
-        current_idx = 0
-        for i, si in enumerate(sheet_infos):
-            if si.name == current_name:
-                current_idx = i
-                break
-        selected_label = st.selectbox(
-            "选择工作表",
-            options=options,
-            index=current_idx,
-            key="sheet_selector",
-            help=".xlsx 与 .xls 默认读取保存时选中的工作表（.xls 无法识别时取最后一张）。可随时切换，切换后自动重新解析。",
-        )
-        # Extract name from label (strip suffix)
-        new_name = selected_label.replace(" （含表头）", "")
-        if new_name != st.session_state.get("selected_sheet_name"):
-            st.session_state.selected_sheet_name = new_name
-            _reset_preview_state()
-
-    # Parse the file
-    tmp_path = st.session_state.get("tmp_file_path")
-    if tmp_path and Path(tmp_path).exists() and st.session_state.sheet is None:
-        try:
-            if kind == "bonus":
-                sheet = parse_bonus_excel(tmp_path)
-            elif kind == "insurance":
-                selected_name = st.session_state.get("selected_sheet_name")
-                sheet = parse_insurance_excel(tmp_path, sheet_name=selected_name)
-            else:
-                selected_name = st.session_state.get("selected_sheet_name")
-                sheet = parse_meal_refund_excel(tmp_path, sheet_name=selected_name)
-            st.session_state.sheet = sheet
-            st.session_state.title = sheet.title
-            st.success(f"解析成功：共 {len(sheet.rows)} 行数据")
-        except ValueError as e:
-            st.session_state.sheet = None
-            _render_error_with_traceback(f"解析失败：{e}", e)
-        except Exception as e:
-            st.session_state.sheet = None
-            _render_error_with_traceback(f"解析失败：{e}", e)
+                    sheet = parse_meal_refund_excel(tmp_file.name)
+                st.session_state.batch_items.append(
+                    {
+                        "kind": kind,
+                        "filename": uploaded_file.name,
+                        "tmp_path": tmp_file.name,
+                        "sheet": sheet,
+                        "title": sheet.title,
+                        "remark": f"制表：{sheet.maker}" if sheet.maker else "",
+                        "file_code": None,
+                        "instance_code": None,
+                        "status": "pending",
+                        "error": None,
+                        "file_sig": file_sig,
+                        "sheet_name": None,
+                    }
+                )
+            except Exception as e:
+                st.session_state.batch_items.append(
+                    {
+                        "kind": kind,
+                        "filename": uploaded_file.name,
+                        "tmp_path": tmp_file.name,
+                        "sheet": None,
+                        "title": "",
+                        "remark": "",
+                        "file_code": None,
+                        "instance_code": None,
+                        "status": "error",
+                        "error": str(e),
+                        "file_sig": file_sig,
+                        "sheet_name": None,
+                    }
+                )
+    return
 
 
 # ---------------------------------------------------------------------------
@@ -500,12 +471,56 @@ def render_step2_preview():
     """Render Step 2: Preview parsed data and lookup submitter."""
     st.subheader("步骤 2：预览数据")
 
+    kind = st.session_state.approval_kind
+    items = st.session_state.batch_items
+
+    # ── 批量预览 ──────────────────────────────────────────
+    if items:
+        error_count = sum(1 for it in items if it["status"] == "error")
+        if error_count:
+            st.error(f"{error_count} 个文件解析失败，请检查后重新上传")
+
+        for idx, item in enumerate(items):
+            sheet = item["sheet"]
+            with st.expander(
+                f"{idx + 1}. {item['filename']}"
+                + ("" if item["status"] != "error" else " ⚠ 解析失败"),
+                expanded=(idx == 0 and error_count == 0),
+            ):
+                if item["status"] == "error":
+                    st.error(f"解析失败：{item['error']}")
+                    continue
+
+                # Editable title per file
+                title_key = f"batch_title_{idx}"
+                title = st.text_input(
+                    "审批标题",
+                    value=item["title"],
+                    key=title_key,
+                )
+                item["title"] = title
+
+                st.markdown("**明细数据：**")
+
+                data = _build_preview_data(kind, sheet)
+                if data:
+                    st.dataframe(data, use_container_width=True, hide_index=True)
+
+                _render_sheet_totals(kind, sheet)
+                st.markdown(f"**数据行数：** {len(sheet.rows)}")
+
+                if sheet.warnings:
+                    for warning in sheet.warnings:
+                        st.warning(warning)
+
+        st.divider()
+        return
+
+    # ── 单文件预览（兼容旧状态）───────────────────────────
     sheet = st.session_state.sheet
     if sheet is None:
         st.info("请先上传表格")
         return
-
-    kind = st.session_state.approval_kind
 
     # Editable title
     title = st.text_input("审批标题", value=st.session_state.title, key="title_input")
@@ -516,7 +531,23 @@ def render_step2_preview():
     # Data preview
     st.markdown("**明细数据：**")
 
-    # Build dataframe
+    data = _build_preview_data(kind, sheet)
+    if data:
+        st.dataframe(data, use_container_width=True, hide_index=True)
+
+    _render_sheet_totals(kind, sheet)
+    st.markdown(f"**数据行数：** {len(sheet.rows)}")
+
+    # Warnings
+    if sheet.warnings:
+        for warning in sheet.warnings:
+            st.warning(warning)
+
+    st.divider()
+
+
+def _build_preview_data(kind, sheet):
+    """Build preview dataframe rows for a parsed sheet."""
     data = []
     if kind == "bonus":
         for row in sheet.rows:
@@ -546,11 +577,11 @@ def render_step2_preview():
                 "身份证号码": row.id_card,
                 "金额": row.amount,
             })
+    return data
 
-    if data:
-        st.dataframe(data, use_container_width=True, hide_index=True)
 
-    # Total line
+def _render_sheet_totals(kind, sheet):
+    """Render total lines for a parsed sheet."""
     if kind == "bonus":
         st.markdown(f"**奖金合计：** {sheet.bonus_total}")
         st.markdown(f"**个人所得税合计：** {sheet.tax_total}")
@@ -563,14 +594,6 @@ def render_step2_preview():
             st.markdown(f"**合计金额：** {sheet.total_amount}（{sheet.total_chinese}）")
         else:
             st.markdown(f"**合计金额：** {sheet.total_amount}")
-    st.markdown(f"**数据行数：** {len(sheet.rows)}")
-
-    # Warnings
-    if sheet.warnings:
-        for warning in sheet.warnings:
-            st.warning(warning)
-
-    st.divider()
 
 
 # ---------------------------------------------------------------------------
@@ -580,6 +603,27 @@ def render_step3_remark():
     """Render Step 3: Optional remark."""
     st.subheader("步骤 3：备注")
 
+    kind = st.session_state.approval_kind
+    items = st.session_state.batch_items
+
+    # ── 批量备注 ──────────────────────────────────────────
+    if items:
+        for idx, item in enumerate(items):
+            sheet = item["sheet"]
+            if item["status"] == "error":
+                continue
+            default_remark = f"制表：{sheet.maker}" if sheet and sheet.maker else ""
+            remark_key = f"batch_remark_{idx}"
+            remark = st.text_area(
+                f"{item['filename']} 备注（可选）",
+                value=item["remark"] or default_remark,
+                key=remark_key,
+            )
+            item["remark"] = remark
+        st.divider()
+        return
+
+    # ── 单文件备注 ────────────────────────────────────────────────
     sheet = st.session_state.sheet
     default_remark = f"制表：{sheet.maker}" if sheet and sheet.maker else ""
 
@@ -594,9 +638,114 @@ def render_step4_actions():
     """Render Step 4: Preview and submit actions."""
     st.subheader("步骤 4：操作")
 
-    sheet = st.session_state.sheet
     kind = st.session_state.approval_kind
+    items = st.session_state.batch_items
 
+    # ── 批量提交 ──────────────────────────────────────────
+    if items:
+        pending = [it for it in items if it["status"] == "pending"]
+        errors = [it for it in items if it["status"] == "error"]
+        done = [it for it in items if it["status"] == "success"]
+
+        if errors:
+            st.error(f"{len(errors)} 个文件解析失败，无法提交，请检查后重新上传")
+
+        if not pending:
+            st.info("没有待提交的审批单")
+        else:
+            st.markdown(f"**待提交审批单：** {len(pending)} 个")
+            for it in pending:
+                st.caption(f"• {it['filename']}（{len(it['sheet'].rows)} 行数据）")
+
+        col_submit, _ = st.columns(2)
+        with col_submit:
+            submit_all = st.button(
+                "全部提交审批",
+                type="primary",
+                use_container_width=True,
+                disabled=not pending or st.session_state.get("batch_submitting", False),
+            )
+
+        if submit_all:
+            st.session_state.batch_submitting = True
+            token = _get_token()
+            if not token:
+                st.error("无法获取访问令牌")
+                st.session_state.batch_submitting = False
+            else:
+                approval_code = get_approval_code(kind)
+                if kind == "bonus":
+                    build_widgets = build_bonus_form_widgets
+                elif kind == "insurance":
+                    build_widgets = build_insurance_form_widgets
+                else:
+                    build_widgets = build_form_widgets
+
+                results = []
+                for idx, item in enumerate(items):
+                    if item["status"] != "pending":
+                        continue
+                    sheet = item["sheet"]
+                    try:
+                        with st.spinner(f"正在提交 {idx + 1}/{len(pending)}：{item['filename']}..."):
+                            # 上传附件
+                            file_code = upload_approval_file(
+                                token,
+                                item["tmp_path"],
+                                filename=item["filename"],
+                            )
+                            # 构建表单控件
+                            form_widgets = build_widgets(
+                                sheet,
+                                file_code=file_code,
+                                title=item["title"],
+                                remark=item["remark"],
+                            )
+                            # 创建审批实例
+                            instance_code = create_instance(
+                                token,
+                                approval_code,
+                                st.session_state.open_id,
+                                form_widgets,
+                                uuid=str(uuid.uuid4()),
+                            )
+                        item["file_code"] = file_code
+                        item["instance_code"] = instance_code
+                        item["status"] = "success"
+                        results.append((item["filename"], instance_code, None))
+                    except Exception as e:
+                        item["status"] = "error"
+                        item["error"] = str(e)
+                        results.append((item["filename"], None, str(e)))
+
+                st.session_state.batch_submitting = False
+
+                # 显示结果
+                success_count = sum(1 for _, _, err in results if err is None)
+                fail_count = len(results) - success_count
+                if success_count:
+                    st.success(f"成功提交 {success_count} 个审批单")
+                if fail_count:
+                    st.error(f"提交失败 {fail_count} 个")
+
+                for filename, instance_code, err in results:
+                    if err is None:
+                        st.markdown(f"✅ **{filename}** → 实例编号：`{instance_code}`")
+                        try:
+                            detail = get_instance_detail(token, instance_code)
+                            instance_url = detail.get("instance_url", "")
+                            if instance_url:
+                                st.markdown(f"  [查看审批详情]({instance_url})")
+                        except Exception:
+                            pass
+                    else:
+                        st.markdown(f"❌ **{filename}** → 提交失败：{err}")
+
+        st.divider()
+        return
+
+    # ── 单文件提交（返餐费 / 五险一金 / 兼容旧 bonus 状态）─────────
+    sheet = st.session_state.sheet
     if sheet is None:
         st.warning("请先上传表格")
         return
@@ -726,8 +875,8 @@ def main():
 
     kind = st.session_state.approval_kind
     if kind == "bonus":
-        st.title("奖金发放审批提交工具")
-        st.markdown("上传奖金明细表，自动解析并提交飞书审批流程。")
+        st.title("奖金发放审批提交工具（批量）")
+        st.markdown("上传多个奖金明细表，每个文件生成一个独立审批单，逐个提交飞书审批流程。")
     elif kind == "insurance":
         st.title("五险一金审批提交工具")
         st.markdown("上传五险一金分单位明细表，自动解析并提交飞书审批流程。")
