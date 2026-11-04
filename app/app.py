@@ -485,7 +485,7 @@ def render_step2_preview():
             with st.expander(
                 f"{idx + 1}. {item['filename']}"
                 + ("" if item["status"] != "error" else " ⚠ 解析失败"),
-                expanded=(idx == 0 and error_count == 0),
+                expanded=True,
             ):
                 if item["status"] == "error":
                     st.error(f"解析失败：{item['error']}")
