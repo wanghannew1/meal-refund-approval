@@ -223,7 +223,11 @@ class TestBuildFormWidgets:
 
 @pytest.fixture
 def sample_bonus_sheet() -> BonusSheet:
-    """Provide a sample BonusSheet for testing."""
+    """Provide a sample BonusSheet for testing.
+
+    No ``个人其他调整`` column, so ``has_adjustment_column`` is False and
+    the adjustment widget is omitted from the built form.
+    """
     return BonusSheet(
         title="科研部发放吉林大学2024年科研业绩津贴明细表（08.28）",
         rows=[
@@ -251,6 +255,7 @@ def sample_bonus_sheet() -> BonusSheet:
         net_total="76496",
         maker="张朦",
         warnings=[],
+        has_adjustment_column=False,
     )
 
 
@@ -339,14 +344,16 @@ class TestBuildBonusFormWidgets:
         assert detail_widget["type"] == "fieldList"
         assert len(detail_widget["value"]) == 2
 
-    def test_detail_row_has_seven_entries(self, sample_bonus_sheet: BonusSheet):
-        """Test each detail row has exactly 7 widgets."""
+    def test_detail_row_has_six_entries_without_adjustment(
+        self, sample_bonus_sheet: BonusSheet
+    ):
+        """Test each detail row has exactly 6 widgets when no adjustment col."""
         widgets = build_bonus_form_widgets(sample_bonus_sheet, "file_code_123")
         for row in widgets[1]["value"]:
-            assert len(row) == 7
+            assert len(row) == 6
 
     def test_detail_row_widget_order(self, sample_bonus_sheet: BonusSheet):
-        """Test detail row widget order: 工号, 姓名, 身份证, 奖金, 个税, 调整, 实发."""
+        """Test detail row widget order: 工号, 姓名, 身份证, 奖金, 个税, 实发."""
         widgets = build_bonus_form_widgets(sample_bonus_sheet, "file_code_123")
         row = widgets[1]["value"][0]
         assert row[0]["id"] == WIDGET_BONUS_EMPLOYEE_ID
@@ -354,8 +361,7 @@ class TestBuildBonusFormWidgets:
         assert row[2]["id"] == WIDGET_BONUS_ID_CARD
         assert row[3]["id"] == WIDGET_BONUS_AMOUNT
         assert row[4]["id"] == WIDGET_BONUS_TAX
-        assert row[5]["id"] == WIDGET_BONUS_ADJUSTMENT
-        assert row[6]["id"] == WIDGET_BONUS_NET
+        assert row[5]["id"] == WIDGET_BONUS_NET
 
     def test_detail_row_types(self, sample_bonus_sheet: BonusSheet):
         """Test input vs amount types in detail row."""
@@ -367,7 +373,6 @@ class TestBuildBonusFormWidgets:
         assert row[3]["type"] == "amount"
         assert row[4]["type"] == "amount"
         assert row[5]["type"] == "amount"
-        assert row[6]["type"] == "amount"
 
     def test_detail_row_values(self, sample_bonus_sheet: BonusSheet):
         """Test detail row values match sheet data."""
@@ -378,8 +383,7 @@ class TestBuildBonusFormWidgets:
         assert row[2]["value"] == "110101199001011234"
         assert row[3]["value"] == "80000"
         assert row[4]["value"] == "15000"
-        assert row[5]["value"] == "0"  # adjustment defaults to "0"
-        assert row[6]["value"] == "65000"
+        assert row[5]["value"] == "65000"
 
     def test_no_serial_in_detail_row(self, sample_bonus_sheet: BonusSheet):
         """Test that serial/序号 is NOT present in detail row widgets."""
@@ -392,7 +396,7 @@ class TestBuildBonusFormWidgets:
         assert "widget17811629865160001" not in all_ids
         for row in widgets[1]["value"]:
             adj_count = sum(1 for w in row if w["id"] == WIDGET_BONUS_ADJUSTMENT)
-            assert adj_count == 1
+            assert adj_count == 0
 
     def test_attachment_widget(self, sample_bonus_sheet: BonusSheet):
         """Test attachment widget contains file code."""
@@ -433,21 +437,8 @@ class TestBuildBonusFormWidgets:
         widgets = build_bonus_form_widgets(sheet, "code")
         assert len(widgets[1]["value"]) == 0
 
-    def test_adjustment_widget_at_index_5(self, sample_bonus_sheet: BonusSheet):
-        """Test adjustment widget is at index 5 between tax and net."""
-        widgets = build_bonus_form_widgets(sample_bonus_sheet, "file_code_123")
-        row = widgets[1]["value"][0]
-        assert row[5]["id"] == WIDGET_BONUS_ADJUSTMENT
-        assert row[5]["type"] == "amount"
-
-    def test_adjustment_value_defaults_to_zero(self, sample_bonus_sheet: BonusSheet):
-        """Test adjustment value defaults to '0' when not set."""
-        widgets = build_bonus_form_widgets(sample_bonus_sheet, "file_code_123")
-        for row in widgets[1]["value"]:
-            assert row[5]["value"] == "0"
-
-    def test_adjustment_value_passes_through(self):
-        """Test adjustment value passes through from row.adjustment."""
+    def test_adjustment_widget_at_index_5(self):
+        """Test adjustment widget is at index 5 when column present and nonzero."""
         sheet = BonusSheet(
             title="Test",
             rows=[
@@ -467,6 +458,75 @@ class TestBuildBonusFormWidgets:
             net_total="900",
             maker="测试",
             adjustment_total="50",
+            has_adjustment_column=True,
+            warnings=[],
+        )
+        widgets = build_bonus_form_widgets(sheet, "file_code_123")
+        row = widgets[1]["value"][0]
+        assert row[5]["id"] == WIDGET_BONUS_ADJUSTMENT
+        assert row[5]["type"] == "amount"
+
+    def test_no_adjustment_widget_when_column_absent(
+        self, sample_bonus_sheet: BonusSheet
+    ):
+        """Test no adjustment widget when column is absent."""
+        widgets = build_bonus_form_widgets(sample_bonus_sheet, "file_code_123")
+        for row in widgets[1]["value"]:
+            ids = {w["id"] for w in row}
+            assert WIDGET_BONUS_ADJUSTMENT not in ids
+
+    def test_no_adjustment_widget_when_all_zero(self):
+        """Test no adjustment widget when column exists but all values are 0."""
+        sheet = BonusSheet(
+            title="Test",
+            rows=[
+                BonusRow(
+                    serial="1",
+                    employee_id="001",
+                    name="张三",
+                    id_card="110101199001011234",
+                    bonus="1000",
+                    tax="100",
+                    net_amount="900",
+                    adjustment="0",
+                ),
+            ],
+            bonus_total="1000",
+            tax_total="100",
+            net_total="900",
+            maker="测试",
+            adjustment_total="0",
+            has_adjustment_column=True,
+            warnings=[],
+        )
+        widgets = build_bonus_form_widgets(sheet, "file_code_123")
+        for row in widgets[1]["value"]:
+            ids = {w["id"] for w in row}
+            assert WIDGET_BONUS_ADJUSTMENT not in ids
+
+    def test_adjustment_value_passes_through(self):
+        """Test adjustment value passes through from row.adjustment when present."""
+        sheet = BonusSheet(
+            title="Test",
+            rows=[
+                BonusRow(
+                    serial="1",
+                    employee_id="001",
+                    name="张三",
+                    id_card="110101199001011234",
+                    bonus="1000",
+                    tax="100",
+                    net_amount="850",
+                    adjustment="50",
+                ),
+            ],
+            bonus_total="1000",
+            tax_total="100",
+            net_total="850",
+            maker="测试",
+            adjustment_total="50",
+            has_adjustment_column=True,
+            warnings=[],
         )
         widgets = build_bonus_form_widgets(sheet, "code")
         row = widgets[1]["value"][0]

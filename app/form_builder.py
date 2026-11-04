@@ -140,47 +140,57 @@ def build_bonus_form_widgets(
         four widgets: title (input), detail list (fieldList),
         attachment (attachmentV2), and remark (textarea).
     """
+    # 仅当原始表有“个人其他调整”列，且至少有一行非零时，才包含该列。
+    # 列不存在或全部为 0 时，不向飞书表单传该列数据。
+    include_adjustment = sheet.has_adjustment_column and any(
+        r.adjustment != "0" for r in sheet.rows
+    )
+
     detail_rows: list[list[dict]] = []
     for row in sheet.rows:
-        detail_rows.append(
-            [
-                {
-                    "id": WIDGET_BONUS_EMPLOYEE_ID,
-                    "type": "input",
-                    "value": row.employee_id,
-                },
-                {
-                    "id": WIDGET_BONUS_NAME,
-                    "type": "input",
-                    "value": row.name,
-                },
-                {
-                    "id": WIDGET_BONUS_ID_CARD,
-                    "type": "input",
-                    "value": row.id_card,
-                },
-                {
-                    "id": WIDGET_BONUS_AMOUNT,
-                    "type": "amount",
-                    "value": row.bonus,
-                },
-                {
-                    "id": WIDGET_BONUS_TAX,
-                    "type": "amount",
-                    "value": row.tax,
-                },
+        detail_row: list[dict] = [
+            {
+                "id": WIDGET_BONUS_EMPLOYEE_ID,
+                "type": "input",
+                "value": row.employee_id,
+            },
+            {
+                "id": WIDGET_BONUS_NAME,
+                "type": "input",
+                "value": row.name,
+            },
+            {
+                "id": WIDGET_BONUS_ID_CARD,
+                "type": "input",
+                "value": row.id_card,
+            },
+            {
+                "id": WIDGET_BONUS_AMOUNT,
+                "type": "amount",
+                "value": row.bonus,
+            },
+            {
+                "id": WIDGET_BONUS_TAX,
+                "type": "amount",
+                "value": row.tax,
+            },
+        ]
+        if include_adjustment:
+            detail_row.append(
                 {
                     "id": WIDGET_BONUS_ADJUSTMENT,
                     "type": "amount",
                     "value": row.adjustment,
-                },
-                {
-                    "id": WIDGET_BONUS_NET,
-                    "type": "amount",
-                    "value": row.net_amount,
-                },
-            ]
+                }
+            )
+        detail_row.append(
+            {
+                "id": WIDGET_BONUS_NET,
+                "type": "amount",
+                "value": row.net_amount,
+            }
         )
+        detail_rows.append(detail_row)
 
     return [
         {

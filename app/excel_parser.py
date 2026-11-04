@@ -713,6 +713,7 @@ class BonusSheet:
     net_total: str
     maker: str
     adjustment_total: str = "0"
+    has_adjustment_column: bool = False
     warnings: list[str] = field(default_factory=list)
 
 
@@ -982,6 +983,7 @@ def parse_bonus_excel(path: str | Path) -> BonusSheet:
         net_total=net_total,
         maker=maker,
         adjustment_total=adjustment_total,
+        has_adjustment_column=idx_adj is not None,
         warnings=warnings,
     )
 

@@ -136,13 +136,14 @@ class TestShippedTemplates:
         bonus_sheet = parse_bonus_excel(BONUS_PATH)
         bonus_widgets = build_bonus_form_widgets(bonus_sheet, file_code="fake_code")
         assert isinstance(bonus_widgets, list)
-        # The detail-list widget contains 4 rows × 7 fields each
+        # The shipped bonus template has no 个人其他调整 column,
+        # so each detail row has 6 fields (adjustment omitted).
         detail_widget = [w for w in bonus_widgets if w.get("type") == "fieldList"]
         assert len(detail_widget) == 1
         detail_rows = detail_widget[0]["value"]
         assert len(detail_rows) == 4
         for row in detail_rows:
-            assert len(row) == 7
+            assert len(row) == 6
 
     # ── Union fee (工会会费) template ────────────────────────────────
 
