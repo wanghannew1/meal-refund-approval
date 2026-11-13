@@ -1019,7 +1019,7 @@ class InsuranceSheet:
 
 
 _INSURANCE_EXCLUDED = frozenset({"序号"})
-_UNIT_HEADER_LABELS = frozenset({"单位名称", "单位", "公司名称", "企业名称"})
+_UNIT_HEADER_LABELS = frozenset({"单位名称", "单位", "公司名称", "企业名称", "用人单位"})
 _PERSON_LEVEL_MARKERS = frozenset({"所属单位", "姓名", "身份证号", "身份证号码"})
 
 
@@ -1096,8 +1096,26 @@ def _is_insurance_monthly_header(rows: list[list[object]]) -> bool:
     return has_unit and has_count
 
 
+def _single_col_merged_label(merged_groups: list[tuple[int, int, str]] | None, col: int) -> str:
+    """纵向合并单元格的列名：仅取单列合并区间的标签（多列横向组标签不算）。"""
+    if not merged_groups:
+        return ""
+    for min_c, max_c, label in merged_groups:
+        if min_c == max_c == col and label:
+            return _insurance_normalize_text(label)
+    return ""
+
+
 def _resolve_insurance_columns(header_rows: list[list[object]], merged_groups: list[tuple[int, int, str]] | None = None) -> tuple[int, int, list[tuple[str, int]]] | None:
-    """解析分单位表头：(单位名称列, 参保人数列, [(组标签, 金额列), ...])。"""
+    """解析分单位表头：(单位名称列, 参保人数列, [(组标签, 金额列), ...])。
+
+    支持两种表头布局：
+    - 两级表头：单位标签行在前，“人数”/费用列名在其下一行；
+    - 单行表头：单位标签与“人数”同在一行，费用子列名在其下一行
+      （如 医保缴费表：用人单位|人数 在上行，单位7.5%/个人2% 在下行）。
+    费用名行某列为空但存在单列纵向合并区间时，回退用合并标签作费用名
+    （如 纵向合并的 单位应缴合计/个人应缴合计 列）。
+    """
     unit_row_idx = _find_unit_row(header_rows)
     if unit_row_idx is None:
         return None
@@ -1116,18 +1134,31 @@ def _resolve_insurance_columns(header_rows: list[list[object]], merged_groups: l
     name_row = header_rows[name_row_idx]
 
     headcount_col = None
-    for col, cell in enumerate(name_row):
+    for col, cell in enumerate(unit_row):
         text = _insurance_normalize_text(cell)
         if _is_headcount_label(text):
             headcount_col = col
             break
+    if headcount_col is None:
+        for col, cell in enumerate(name_row):
+            text = _insurance_normalize_text(cell)
+            if _is_headcount_label(text):
+                headcount_col = col
+                break
     if headcount_col is None:
         return None
 
     money_cols: list[tuple[str, int]] = []
     for col, cell in enumerate(name_row):
         text = _insurance_normalize_text(cell)
-        if not text or _is_excluded_label(text):
+        if text and _is_excluded_label(text):
+            continue
+        if not text:
+            # 列名在纵向合并单元格中（标签位于单位标签行）。
+            merged_label = _single_col_merged_label(merged_groups, col)
+            if not merged_label or _is_excluded_label(merged_label):
+                continue
+            money_cols.append((merged_label, col))
             continue
         group = _group_label_for_col(header_rows, name_row_idx, col, merged_groups)
         money_cols.append((group, col))
@@ -1329,10 +1360,10 @@ def parse_insurance_excel(
     # 没有第一级组标签的单层表保持裸列名。
     fee_names: list[str] = []
     for (group, col), name in zip(money_cols, normalized_names):
-        if group:
+        if group and name:
             fee_names.append(f"{group}-{name}")
         else:
-            fee_names.append(name)
+            fee_names.append(group or name)
 
     rows: list[InsuranceUnitRow] = []
     warnings: list[str] = []
@@ -1395,6 +1426,10 @@ def parse_insurance_excel(
                 total_val = Decimal(total_text) if total_text else None
             except InvalidOperation:
                 total_val = None
+            if total_val is not None:
+                # 明细金额已按2位小数累加，合计同样四舍五入后再比较，
+                # 避免浮点噪声（如 34003.6699999999）造成误报。
+                total_val = total_val.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             if total_val is None:
                 if col_sums[i] != 0:
                     warnings.append(f"第{col + 1}列合计为空")

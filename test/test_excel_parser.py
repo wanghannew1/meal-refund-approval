@@ -1603,7 +1603,7 @@ class TestInsuranceHeaderDetection:
             _insurance_normalize_text(rows[name_row_idx][col]) for _, col in resolved[2]
         ]
         return [
-            f"{group}-{name}" if group else name
+            f"{group}-{name}" if group and name else (group or name)
             for (group, col), name in zip(resolved[2], normalized)
         ]
 
@@ -1752,6 +1752,34 @@ class TestInsuranceHeaderDetection:
         names = self._final_names(resolved, rows, [(2, 5, "本月缴纳")])
         assert names == ["本月缴纳-费用A", "本月缴纳-费用B", "本月缴纳-费用C"]
 
+    def test_jilin_single_row_header_true(self):
+        """吉林医保表：用人单位与人数同在上行，费用子列名在下行，合计列纵向合并。"""
+        rows = [
+            ["吉林市分公司2026年11月医保代办保险明细", "", "", "", "", "", "", "", "", "", ""],
+            [
+                "序号", "用人单位", "人数", "医疗保险", "医疗保险",
+                "补缴医疗保险", "补缴医疗保险", "大额医疗保险",
+                "单位应缴\n合计", "个人应缴\n合计", "本月应缴\n合计",
+            ],
+            ["", "", "", "单位7.5%", "个人2%", "单位7.5%", "个人2%", "个人", "", "", ""],
+        ]
+        assert _is_insurance_monthly_header(rows) is True
+        merged = [
+            (0, 0, "序号"), (1, 1, "用人单位"), (2, 2, "人数"),
+            (3, 4, "医疗保险"), (5, 6, "补缴医疗保险"),
+            (8, 8, "单位应缴\n合计"), (9, 9, "个人应缴\n合计"), (10, 10, "本月应缴\n合计"),
+        ]
+        resolved = _resolve_insurance_columns(rows, merged)
+        assert resolved is not None
+        assert resolved[0] == 1
+        assert resolved[1] == 2
+        assert self._final_names(resolved, rows, merged) == [
+            "医疗保险-单位7.5%", "医疗保险-个人2%",
+            "补缴医疗保险-单位7.5%", "补缴医疗保险-个人2%",
+            "大额医疗保险-个人",
+            "单位应缴合计", "个人应缴合计", "本月应缴合计",
+        ]
+
 
 class TestParseInsuranceExcel:
     def _parse(self, tmp_path: Path, rows: list[list[object]], merges: tuple[str, ...] = ()):
@@ -1839,6 +1867,52 @@ class TestParseInsuranceExcel:
         ]
         assert sheet.rows[0].headcount == 5
         assert sheet.maker == "张艳艳"
+
+    def test_jilin_medical_floating_noise_total_consistent(self, tmp_path):
+        """吉林医保缴费表：单行表头+纵向合并合计列+浮点噪声合计校验不误报。"""
+        rows = [
+            ["吉林市分公司2026年11月医保代办保险明细", "", "", "", "", "", "", "", "", "", ""],
+            [
+                "序号", "用人单位", "人数", "医疗保险", "医疗保险",
+                "补缴医疗保险", "补缴医疗保险", "大额医疗保险",
+                "单位应缴合计", "个人应缴合计", "本月应缴合计",
+            ],
+            ["", "", "", "单位7.5%", "个人2%", "单位7.5%", "个人2%", "个人", "", "", ""],
+            [
+                "1", "吉林省东风化工有限责任公司", "101", 34003.6699999999, 9067.78,
+                0, 0, 1010, 34003.6699999999, 10077.78, 44081.4499999999,
+            ],
+            [
+                "合计", "", "101", 34003.6699999999, 9067.78,
+                0, 0, 1010, 34003.6699999999, 10077.78, 44081.4499999999,
+            ],
+            ["总经理签字：", "分管领导：", "制表人：董健平", "", "", "", "", "", "", "", ""],
+        ]
+        sheet = self._parse(
+            tmp_path,
+            rows,
+            merges=(
+                "A2:A3", "B2:B3", "C2:C3",
+                "D2:E2", "F2:G2",
+                "I2:I3", "J2:J3", "K2:K3",
+            ),
+        )
+        assert sheet.title == "吉林市分公司2026年11月医保代办保险明细"
+        assert len(sheet.rows) == 1
+        assert sheet.rows[0].unit_name == "吉林省东风化工有限责任公司"
+        assert sheet.rows[0].headcount == 101
+        assert [f.name for f in sheet.rows[0].fees] == [
+            "医疗保险-单位7.5%", "医疗保险-个人2%",
+            "补缴医疗保险-单位7.5%", "补缴医疗保险-个人2%",
+            "大额医疗保险-个人",
+            "单位应缴合计", "个人应缴合计", "本月应缴合计",
+        ]
+        assert [f.amount for f in sheet.rows[0].fees] == [
+            "34003.67", "9067.78", "0.00", "0.00", "1010.00",
+            "34003.67", "10077.78", "44081.45",
+        ]
+        assert sheet.maker == "董健平"
+        assert sheet.warnings == []
 
     def test_more_than_17_fees_raises(self, tmp_path):
         header = ["序号", "单位名称", "已参保"] + [f"费用{i}" for i in range(18)]
