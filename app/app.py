@@ -358,31 +358,29 @@ def render_step1_upload():
 
     with st.expander("模板下载", expanded=False):
         st.markdown("**模板下载（可直接填写后上传）：**")
-        col_meal, col_unf, col_bonus, col_ins = st.columns(4)
-
-        templates = [
-            (col_meal, "返餐费明细表模板.xlsx"),
-            (col_unf, "工会会费明细表模板.xlsx"),
-            (col_bonus, "科研业绩津贴明细表模板.xlsx"),
-            (col_ins, "保险审批模板.xlsx"),
-        ]
-        for col, filename in templates:
-            template_path = _PROJECT_ROOT / "templates" / filename
-            with col:
-                if template_path.is_file():
-                    data = template_path.read_bytes()
-                    st.download_button(
-                        label=f"下载{filename.replace('.xlsx', '')}",
-                        data=data,
-                        file_name=filename,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
-                    )
-                else:
-                    st.warning(f"模板文件缺失：{filename}")
+        templates_dir = _PROJECT_ROOT / "templates"
+        template_paths = sorted(templates_dir.glob("*.xlsx")) + sorted(
+            (templates_dir / "insurance").glob("*.xlsx")
+        )
+        if template_paths:
+            for chunk_start in range(0, len(template_paths), 4):
+                chunk = template_paths[chunk_start : chunk_start + 4]
+                cols = st.columns(4)
+                for col, template_path in zip(cols, chunk):
+                    with col:
+                        st.download_button(
+                            label=f"下载{template_path.stem}",
+                            data=template_path.read_bytes(),
+                            file_name=template_path.name,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True,
+                        )
+        else:
+            st.warning("模板文件缺失")
 
         st.caption("模板已脱敏（不含真实个人信息）；请保留表头与合计行结构后填写。")
         st.caption("返餐费末行写『总计』，工会会费末行写『合计』；工会会费多出的合计列可忽略。")
+        st.caption("五险一金请使用对应的分单位模板（医保/社保/工伤/公积金），每月一个 sheet 或一个文件均可。")
 
     kind = st.session_state.approval_kind
     if kind == "bonus":
