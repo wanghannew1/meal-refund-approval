@@ -82,6 +82,8 @@ if "tmp_file_path" not in st.session_state:
     st.session_state.tmp_file_path = None
 if "approval_kind" not in st.session_state:
     st.session_state.approval_kind = "meal"
+if "approval_entity" not in st.session_state:
+    st.session_state.approval_entity = "branch"
 if "uploaded_filename" not in st.session_state:
     st.session_state.uploaded_filename = None
 if "uploaded_file_sig" not in st.session_state:
@@ -108,17 +110,55 @@ def _require_env_code(name: str, label: str) -> str:
     return code
 
 
-def get_approval_code(kind: str) -> str:
-    """Return the effective approval code for the given kind.
+# 五险一金按公司主体路由到不同审批定义。Code 全部来自环境变量，
+# 代码中不硬编码审批定义 UUID；新增主体只需在此登记一行。
+INSURANCE_ENTITIES: dict[str, dict[str, str]] = {
+    "branch": {
+        "label": "分公司",
+        "env": "FEISHU_INSURANCE_BRANCH_APPROVAL_CODE",
+        # 旧部署只配了统一名称，继续兼容分公司主体
+        "legacy_env": "FEISHU_INSURANCE_APPROVAL_CODE",
+    },
+    "caihong": {
+        "label": "彩虹公司",
+        "env": "FEISHU_INSURANCE_CAIHONG_APPROVAL_CODE",
+        "legacy_env": "",
+    },
+}
+
+DEFAULT_INSURANCE_ENTITY = "branch"
+
+
+def get_insurance_entity(entity: str) -> dict[str, str]:
+    """Return the entity registry entry, falling back to 分公司."""
+    return INSURANCE_ENTITIES.get(entity, INSURANCE_ENTITIES[DEFAULT_INSURANCE_ENTITY])
+
+
+def get_approval_code(kind: str, entity: str = DEFAULT_INSURANCE_ENTITY) -> str:
+    """Return the effective approval code for the given kind (and entity).
 
     All approval codes come from environment variables; there are no
     built-in fallbacks. The legacy FEISHU_APPROVAL_CODE name is still
-    accepted for meal approvals so existing deployments keep working.
+    accepted for meal approvals, and FEISHU_INSURANCE_APPROVAL_CODE is
+    still accepted for the branch-company insurance approval, so existing
+    deployments keep working.
     """
     if kind == "bonus":
         return _require_env_code("FEISHU_BONUS_APPROVAL_CODE", "奖金发放审批 Code")
     if kind == "insurance":
-        return _require_env_code("FEISHU_INSURANCE_APPROVAL_CODE", "五险一金审批 Code")
+        meta = get_insurance_entity(entity)
+        code = os.getenv(meta["env"], "").strip()
+        if code:
+            return code
+        legacy_env = meta.get("legacy_env", "")
+        if legacy_env:
+            legacy_code = os.getenv(legacy_env, "").strip()
+            if legacy_code:
+                return legacy_code
+        label = meta["label"]
+        raise RuntimeError(
+            f"缺少环境变量 {meta['env']}，请在 .env 中配置{label}五险一金审批 Code"
+        )
 
     meal_code = os.getenv("FEISHU_MEAL_APPROVAL_CODE", "").strip()
     if meal_code:
@@ -133,11 +173,12 @@ def get_approval_code(kind: str) -> str:
     )
 
 
-def kind_meta(kind: str) -> tuple[str, str]:
-    """Return (label, approval_code) for a given kind.
+def kind_meta(kind: str, entity: str = DEFAULT_INSURANCE_ENTITY) -> tuple[str, str]:
+    """Return (label, approval_code) for a given kind (and entity).
 
     All approval codes come from environment variables; there are no
-    built-in fallbacks.
+    built-in fallbacks. The insurance label carries the company entity,
+    e.g. ``五险一金审批（分公司）``.
     """
     if kind == "bonus":
         return (
@@ -145,9 +186,10 @@ def kind_meta(kind: str) -> tuple[str, str]:
             _require_env_code("FEISHU_BONUS_APPROVAL_CODE", "奖金发放审批 Code"),
         )
     if kind == "insurance":
+        meta = get_insurance_entity(entity)
         return (
-            "五险一金审批",
-            _require_env_code("FEISHU_INSURANCE_APPROVAL_CODE", "五险一金审批 Code"),
+            f"五险一金审批（{meta['label']}）",
+            get_approval_code(kind, entity),
         )
     return "派遣员工简易费用明细表审批", get_approval_code(kind)
 
@@ -305,7 +347,8 @@ def render_login_gate() -> bool:
 def render_sidebar():
     """Render sidebar with tool info and environment status."""
     kind = st.session_state.approval_kind
-    kind_label, _ = kind_meta(kind)
+    entity = st.session_state.approval_entity
+    kind_label, _ = kind_meta(kind, entity)
     tool_title = f"{kind_label}提交工具"
 
     with st.sidebar:
@@ -313,21 +356,31 @@ def render_sidebar():
         st.divider()
 
         # Approval info
-        approval_code = get_approval_code(kind)
+        try:
+            approval_code = get_approval_code(kind, entity)
+            routing_error = ""
+        except RuntimeError as e:
+            approval_code = ""
+            routing_error = str(e)
         st.markdown(f"**审批类型：** {kind_label}")
+        if kind == "insurance":
+            st.markdown(f"**公司主体：** {get_insurance_entity(entity)['label']}")
         st.markdown(f"**审批定义：**")
-        st.code(approval_code, language=None)
-
-        approval_name = _get_approval_name_cached(approval_code)
-        if approval_name:
-            st.success(f"审批名称：{approval_name}")
+        if routing_error:
+            st.error(routing_error)
         else:
-            app_id = os.getenv("FEISHU_APP_ID", "")
-            app_secret = os.getenv("FEISHU_APP_SECRET", "")
-            if not app_id or not app_secret:
-                st.warning("未配置飞书应用凭证")
+            st.code(approval_code, language=None)
+
+            approval_name = _get_approval_name_cached(approval_code)
+            if approval_name:
+                st.success(f"审批名称：{approval_name}")
             else:
-                st.warning("无法获取审批名称（请检查凭证或网络）")
+                app_id = os.getenv("FEISHU_APP_ID", "")
+                app_secret = os.getenv("FEISHU_APP_SECRET", "")
+                if not app_id or not app_secret:
+                    st.warning("未配置飞书应用凭证")
+                else:
+                    st.warning("无法获取审批名称（请检查凭证或网络）")
 
         st.divider()
 
@@ -386,7 +439,8 @@ def render_step1_upload():
     if kind == "bonus":
         label = "选择奖金明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）"
     elif kind == "insurance":
-        label = "选择五险一金明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）"
+        entity_label = get_insurance_entity(st.session_state.approval_entity)["label"]
+        label = f"选择{entity_label}五险一金明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）"
     else:
         label = "选择返餐费或工会会费明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）"
 
@@ -671,7 +725,12 @@ def render_step4_actions():
                 st.error("无法获取访问令牌")
                 st.session_state.batch_submitting = False
             else:
-                approval_code = get_approval_code(kind)
+                try:
+                    approval_code = get_approval_code(kind, st.session_state.approval_entity)
+                except RuntimeError as e:
+                    st.error(str(e))
+                    st.session_state.batch_submitting = False
+                    return
                 if kind == "bonus":
                     build_widgets = build_bonus_form_widgets
                 elif kind == "insurance":
@@ -748,7 +807,11 @@ def render_step4_actions():
         st.warning("请先上传表格")
         return
 
-    approval_code = get_approval_code(kind)
+    try:
+        approval_code = get_approval_code(kind, st.session_state.approval_entity)
+    except RuntimeError as e:
+        st.error(str(e))
+        return
     if kind == "bonus":
         build_widgets = build_bonus_form_widgets
     elif kind == "insurance":
@@ -872,11 +935,12 @@ def main():
     render_sidebar()
 
     kind = st.session_state.approval_kind
+    entity_label = get_insurance_entity(st.session_state.approval_entity)["label"]
     if kind == "bonus":
         st.title("奖金发放审批提交工具（批量）")
         st.markdown("上传多个奖金明细表，每个文件生成一个独立审批单，逐个提交飞书审批流程。")
     elif kind == "insurance":
-        st.title("五险一金审批提交工具")
+        st.title(f"五险一金审批提交工具（{entity_label}）")
         st.markdown("上传五险一金分单位明细表，自动解析并提交飞书审批流程。")
     else:
         st.title("派遣员工简易费用明细表审批提交工具")
@@ -904,6 +968,24 @@ def main():
         st.session_state.approval_kind = new_kind
         _reset_sheet_state()
         st.rerun()
+
+    # 五险一金主体选择器：分公司 / 彩虹公司路由到不同审批定义。
+    # 解析结果与主体无关，切换主体不清空已上传数据，仅切换提交路由。
+    if new_kind == "insurance":
+        entity_keys = list(INSURANCE_ENTITIES)
+        entity_labels = [INSURANCE_ENTITIES[k]["label"] for k in entity_keys]
+        current_entity = st.session_state.approval_entity
+        default_idx = entity_keys.index(current_entity) if current_entity in entity_keys else 0
+        entity_choice = st.radio(
+            "公司主体",
+            entity_labels,
+            index=default_idx,
+            horizontal=True,
+        )
+        new_entity = entity_keys[entity_labels.index(entity_choice)]
+        if new_entity != st.session_state.approval_entity:
+            st.session_state.approval_entity = new_entity
+            st.rerun()
 
     st.divider()
 
