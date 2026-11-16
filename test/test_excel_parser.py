@@ -1780,11 +1780,80 @@ class TestInsuranceHeaderDetection:
             "单位应缴合计", "个人应缴合计", "本月应缴合计",
         ]
 
+    def test_caihong_transfer_summary_true(self):
+        """彩虹转款汇总：所属单位作单位列，两级表头 + 缴费合计列纵向合并。"""
+        rows = [
+            ["市工伤2026年9月转账明细", "", "", "", "", "", "", "", "", ""],
+            ["", "", "", "", "", "", "", "", "", ""],
+            ["单位：", "吉林省彩虹人才开发咨询服务有限公司", "", "", "", "", "", "", "", "单位：元"],
+            ["序号", "所属单位", "已参保", "", "当月补收", "", "", "基数差额补缴", "", "缴费合计"],
+            ["", "", "人数", "合计（0.2%）", "人数", "金额", "合计（0.2%）", "人数", "合计（0.2%）", ""],
+            ["1", "测试单位A", "3", "34.47", "0", "0", "0", "3", "1.44", "35.91"],
+            ["合计", "", "3", "34.47", "0", "0", "0", "3", "1.44", "35.91"],
+        ]
+        assert _is_insurance_monthly_header(rows) is True
+        merged = [
+            (0, 0, "序号"), (1, 1, "所属单位"),
+            (2, 3, "已参保"), (4, 6, "当月补收"), (7, 8, "基数差额补缴"),
+            (9, 9, "缴费合计"),
+        ]
+        resolved = _resolve_insurance_columns(rows, merged)
+        assert resolved is not None
+        assert resolved[0] == 1
+        assert resolved[1] == 2
+        assert self._final_names(resolved, rows, merged) == [
+            "已参保-合计（0.2%）", "当月补收-金额", "当月补收-合计（0.2%）",
+            "基数差额补缴-合计（0.2%）", "缴费合计",
+        ]
+
 
 class TestParseInsuranceExcel:
     def _parse(self, tmp_path: Path, rows: list[list[object]], merges: tuple[str, ...] = ()):
         fp = _InsuranceWorkbook.make(tmp_path, rows, merges=merges)
         return parse_insurance_excel(fp)
+
+    def test_caihong_transfer_summary_parse(self, tmp_path):
+        """彩虹转款汇总端到端：两级合并表头、合计行校验、制表人提取。"""
+        rows = [
+            ["市工伤2026年9月转账明细", "", "", "", "", "", "", "", "", ""],
+            ["", "", "", "", "", "", "", "", "", ""],
+            ["单位：", "吉林省彩虹人才开发咨询服务有限公司", "", "", "", "", "", "", "", "单位：元"],
+            ["序号", "所属单位", "已参保", "", "当月补收", "", "", "基数差额补缴", "", "缴费合计"],
+            ["", "", "人数", "合计（0.2%）", "人数", "金额", "合计（0.2%）", "人数", "合计（0.2%）", ""],
+            ["1", "测试单位A", "3", "34.47", "0", "0", "0", "3", "1.44", "35.91"],
+            ["2", "测试单位B", "2", "22.98", "1", "11.49", "11.49", "0", "0", "34.47"],
+            ["合计", "", "5", "57.45", "1", "11.49", "11.49", "3", "1.44", "70.38"],
+            ["总经理签字：  分管领导审核：  财务审核：  业务审核：", "", "", "", "", "", "", "", "", " 制表人：李阳"],
+        ]
+        merges = (
+            "A4:A5", "B4:B5", "J4:J5",  # 序号 / 所属单位 / 缴费合计 纵向合并
+            "C4:D4", "E4:G4", "H4:I4",  # 已参保 / 当月补收 / 基数差额补缴 横向组
+        )
+        sheet = self._parse(tmp_path, rows, merges=merges)
+        assert sheet.title == "市工伤2026年9月转账明细"
+        assert len(sheet.rows) == 2
+        assert sheet.maker == "李阳"
+        assert sheet.warnings == []
+        first = sheet.rows[0]
+        assert first.unit_name == "测试单位A"
+        assert first.headcount == 3
+        assert [(f.name, f.amount) for f in first.fees] == [
+            ("已参保-合计（0.2%）", "34.47"),
+            ("当月补收-金额", "0.00"),
+            ("当月补收-合计（0.2%）", "0.00"),
+            ("基数差额补缴-合计（0.2%）", "1.44"),
+            ("缴费合计", "35.91"),
+        ]
+        second = sheet.rows[1]
+        assert second.unit_name == "测试单位B"
+        assert second.headcount == 2
+        assert [(f.name, f.amount) for f in second.fees] == [
+            ("已参保-合计（0.2%）", "22.98"),
+            ("当月补收-金额", "11.49"),
+            ("当月补收-合计（0.2%）", "11.49"),
+            ("基数差额补缴-合计（0.2%）", "0.00"),
+            ("缴费合计", "34.47"),
+        ]
 
     def test_medical_base_empty_amount_skipped(self, tmp_path):
         rows = [

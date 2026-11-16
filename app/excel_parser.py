@@ -1019,8 +1019,12 @@ class InsuranceSheet:
 
 
 _INSURANCE_EXCLUDED = frozenset({"序号"})
-_UNIT_HEADER_LABELS = frozenset({"单位名称", "单位", "公司名称", "企业名称", "用人单位"})
-_PERSON_LEVEL_MARKERS = frozenset({"所属单位", "姓名", "身份证号", "身份证号码"})
+# 所属单位 也可能是单位列标签：彩虹转款汇总用它作单位列（人员级表同时
+# 含 姓名/身份证号，仍会被 _PERSON_LEVEL_MARKERS 拦截）。
+_UNIT_HEADER_LABELS = frozenset(
+    {"单位名称", "单位", "公司名称", "企业名称", "用人单位", "所属单位"}
+)
+_PERSON_LEVEL_MARKERS = frozenset({"姓名", "身份证号", "身份证号码"})
 
 
 def _insurance_normalize_text(cell: object) -> str:
@@ -1077,8 +1081,9 @@ def _group_label_for_col(header_rows: list[list[object]], name_row_idx: int, col
 
 
 def _is_insurance_monthly_header(rows: list[list[object]]) -> bool:
-    """人员级表头含 所属单位/姓名/身份证号，一律判False；
-    分单位月度表头需出现单位列与任意“人数”列，具体列名/组名不做写死。"""
+    """人员级表头含 姓名/身份证号，一律判False；
+    分单位月度表头需出现单位列（单位名称/所属单位等）与任意“人数”列，
+    具体列名/组名不做写死。"""
     for row in rows[:40]:
         for cell in row:
             text = _insurance_normalize_text(cell)
@@ -1115,7 +1120,13 @@ def _resolve_insurance_columns(header_rows: list[list[object]], merged_groups: l
       （如 医保缴费表：用人单位|人数 在上行，单位7.5%/个人2% 在下行）。
     费用名行某列为空但存在单列纵向合并区间时，回退用合并标签作费用名
     （如 纵向合并的 单位应缴合计/个人应缴合计 列）。
+    人员级表头（姓名/身份证号）直接拒绝，与 _is_insurance_monthly_header
+    的识别口径一致，避免显式指定 sheet 时把人员明细误解析为分单位数据。
     """
+    for row in header_rows:
+        for cell in row:
+            if _insurance_normalize_text(cell) in _PERSON_LEVEL_MARKERS:
+                return None
     unit_row_idx = _find_unit_row(header_rows)
     if unit_row_idx is None:
         return None
@@ -1198,10 +1209,15 @@ def _sheet_merged_group_ranges(path: Path, suffix: str, sheet_name: str | None, 
     elif suffix == ".xls":
         import xlrd
 
+        # merged_cells 仅在 formatting_info=True 时填充；部分生成器导出的
+        # .xls 不支持该选项，退回普通读取（此时无合并组标签可用）。
         try:
-            wb = xlrd.open_workbook(str(path))
+            wb = xlrd.open_workbook(str(path), formatting_info=True)
         except Exception:
-            return []
+            try:
+                wb = xlrd.open_workbook(str(path))
+            except Exception:
+                return []
         try:
             if sheet_name is not None:
                 try:
@@ -1220,11 +1236,13 @@ def _sheet_merged_group_ranges(path: Path, suffix: str, sheet_name: str | None, 
             target_row = group_row_idx
             for rng in merged:
                 if len(rng) == 4:
+                    # xlrd 区间为半开 [r1,r2) × [c1,c2)，统一换算为
+                    # 0-based 闭区间（与 openpyxl 分支口径一致）。
                     r1, r2, c1, c2 = rng
-                    if r1 <= target_row <= r2:
+                    if r1 <= target_row < r2 and c2 - 1 >= c1:
                         label = sh.cell_value(r1, c1)
                         if label is not None and str(label).strip():
-                            ranges.append((c1, c2, str(label)))
+                            ranges.append((c1, c2 - 1, str(label)))
             return ranges
         finally:
             pass
