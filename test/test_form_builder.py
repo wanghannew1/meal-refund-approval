@@ -10,8 +10,6 @@ from app.excel_parser import BonusRow, BonusSheet, InsuranceFeeItem, InsuranceSh
 import app.form_builder as form_builder_module
 from app.form_builder import (
     CAIHONG_DETAIL_WIDGET_PAIRS,
-    CAIHONG_INS_NOTE,
-    CAIHONG_INS_NOTE_VALUE,
     CAIHONG_INS_SUBTOTAL,
     INSURANCE_FEE_WIDGET_PAIRS,
     INS_UNITS_NAME,
@@ -699,14 +697,14 @@ class TestCaihongInsuranceFormWidgets:
         assert CAIHONG_DETAIL_WIDGET_PAIRS[-1] == INSURANCE_FEE_WIDGET_PAIRS[-1]
 
     def test_detail_row_structure(self):
-        """Test each unit row: [单位名称, 参保人数, 小计金额, 说明1]."""
+        """Test each unit row: [单位名称, 参保人数, 小计金额]."""
         sheet = self._make_sheet(
             [("已参保-合计（0.2%）", "34.47"), ("缴费合计", "35.91")]
         )
         widgets = build_caihong_insurance_form_widgets(sheet, "file_code_123")
         assert len(widgets) == 4
         row = widgets[1]["value"][0]
-        assert len(row) == 4
+        assert len(row) == 3
         assert row[0]["id"] == INS_UNITS_NAME
         assert row[0]["value"] == "单位A"
         assert row[1]["id"] == INS_HEADCOUNT
@@ -714,9 +712,15 @@ class TestCaihongInsuranceFormWidgets:
         assert isinstance(row[1]["value"], int)
         assert row[2]["id"] == CAIHONG_INS_SUBTOTAL
         assert row[2]["type"] == "amount"
-        assert row[3]["id"] == CAIHONG_INS_NOTE
-        assert row[3]["type"] == "text"
-        assert row[3]["value"] == CAIHONG_INS_NOTE_VALUE
+
+    def test_removed_note_widget_not_sent(self):
+        """说明1 静态控件已从飞书表单删除，payload 不得再携带。"""
+        sheet = self._make_sheet([("缴费合计", "35.91")])
+        widgets = build_caihong_insurance_form_widgets(sheet, "file_code_123")
+        for detail_row in widgets[1]["value"]:
+            assert all(
+                w["id"] != "widget17951450334860001" for w in detail_row
+            )
 
     def test_subtotal_is_row_total_last_fee(self):
         """小计金额必须取最后一列行合计，而不是第一列费用。"""

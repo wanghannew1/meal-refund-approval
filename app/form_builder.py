@@ -365,16 +365,16 @@ def build_insurance_form_widgets(
 
 
 # ── 彩虹公司五险一金审批（2026-11 表单改版）──────────────────────────
-# 明细行结构：单位名称 + 参保人数 + 小计金额 + 说明1（静态文字）+
-# 明细1~16 / 金额1~16。财务要求现阶段每行只把 Excel 最后一列的行合计
-# （缴费合计 / 转款-合计）填入 小计金额，明细1~16 留空，为后续升级预留。
+# 明细行结构：单位名称 + 参保人数 + 小计金额 + 明细1~16 / 金额1~16。
+# 财务要求现阶段每行只把 Excel 最后一列的行合计（缴费合计 / 转款-合计）
+# 填入 小计金额，明细1~16 留空，为后续升级预留。
 #
 # 控件 ID 与分公司表高度重合：单位名称/参保人数 完全相同；小计金额
 # 沿用分公司 费用金额1 的 ID；明细1~16 与分公司表 费用名称/金额
-# 第 2~17 对同 ID（新增的只有 说明1 静态文字控件）。
+# 第 2~17 对同 ID。改版初期表单里曾插入 说明1 静态文字控件
+# （widget17951450334860001，值「以下为费用明细」），后已从表单删除，
+# payload 随之不再携带。
 CAIHONG_INS_SUBTOTAL = "widget17822958110070001"
-CAIHONG_INS_NOTE = "widget17951450334860001"
-CAIHONG_INS_NOTE_VALUE = "以下为费用明细"
 # 预留：明细1~16/金额1~16，后续升级直接按此列表填写。
 CAIHONG_DETAIL_WIDGET_PAIRS = INSURANCE_FEE_WIDGET_PAIRS[1:]
 
@@ -388,15 +388,11 @@ def build_caihong_insurance_form_widgets(
     """Build the widget list for the 彩虹公司五险一金 approval instance.
 
     The form was redesigned (2026-11): each detail row now holds
-    单位名称 + 参保人数 + 小计金额 + a static 说明 separator +
-    明细1~16/金额1~16 pairs.  Per finance's current requirement only
-    the row total (the Excel's last money column, e.g. 缴费合计 /
-    转款-合计) is submitted, into 小计金额; the 16 detail pairs stay
-    empty and are reserved for a future upgrade
-    (see ``CAIHONG_DETAIL_WIDGET_PAIRS``).
-
-    The 说明1 static text widget carries a fixed value in the form
-    definition and is required, so it is sent with that value.
+    单位名称 + 参保人数 + 小计金额 + 明细1~16/金额1~16 pairs.  Per
+    finance's current requirement only the row total (the Excel's
+    last money column, e.g. 缴费合计 / 转款-合计) is submitted, into
+    小计金额; the 16 detail pairs stay empty and are reserved for a
+    future upgrade (see ``CAIHONG_DETAIL_WIDGET_PAIRS``).
 
     Args:
         sheet: Parsed 五险一金 sheet.
@@ -434,11 +430,6 @@ def build_caihong_insurance_form_widgets(
                     "id": CAIHONG_INS_SUBTOTAL,
                     "type": "amount",
                     "value": subtotal,
-                },
-                {
-                    "id": CAIHONG_INS_NOTE,
-                    "type": "text",
-                    "value": CAIHONG_INS_NOTE_VALUE,
                 },
             ]
         )
