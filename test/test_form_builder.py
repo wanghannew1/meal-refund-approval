@@ -9,6 +9,10 @@ import pytest
 from app.excel_parser import BonusRow, BonusSheet, InsuranceFeeItem, InsuranceSheet, InsuranceUnitRow, MealRefundRow, MealRefundSheet
 import app.form_builder as form_builder_module
 from app.form_builder import (
+    CAIHONG_DETAIL_WIDGET_PAIRS,
+    CAIHONG_INS_NOTE,
+    CAIHONG_INS_NOTE_VALUE,
+    CAIHONG_INS_SUBTOTAL,
     INSURANCE_FEE_WIDGET_PAIRS,
     INS_UNITS_NAME,
     INS_HEADCOUNT,
@@ -32,6 +36,7 @@ from app.form_builder import (
     WIDGET_ROW_SERIAL,
     WIDGET_TITLE,
     build_bonus_form_widgets,
+    build_caihong_insurance_form_widgets,
     build_form_widgets,
     build_insurance_form_widgets,
 )
@@ -675,3 +680,74 @@ class TestBuildInsuranceFormWidgets:
         )
         with pytest.raises(ValueError, match="费用项超过17项"):
             build_insurance_form_widgets(sheet, "file_code_123")
+
+
+class TestCaihongInsuranceFormWidgets:
+    """Tests for build_caihong_insurance_form_widgets (彩虹 2026-11 改版表单)."""
+
+    def _make_sheet(self, fees: list[tuple[str, str]]) -> InsuranceSheet:
+        return InsuranceSheet(
+            title="市工伤2026年9月转账明细",
+            rows=[_make_insurance_row("单位A", 5, fees)],
+            maker="张三",
+        )
+
+    def test_reserved_detail_pairs_cover_16(self):
+        """明细1~16 预留对与分公司第2~17对同 ID。"""
+        assert len(CAIHONG_DETAIL_WIDGET_PAIRS) == 16
+        assert CAIHONG_DETAIL_WIDGET_PAIRS[0] == INSURANCE_FEE_WIDGET_PAIRS[1]
+        assert CAIHONG_DETAIL_WIDGET_PAIRS[-1] == INSURANCE_FEE_WIDGET_PAIRS[-1]
+
+    def test_detail_row_structure(self):
+        """Test each unit row: [单位名称, 参保人数, 小计金额, 说明1]."""
+        sheet = self._make_sheet(
+            [("已参保-合计（0.2%）", "34.47"), ("缴费合计", "35.91")]
+        )
+        widgets = build_caihong_insurance_form_widgets(sheet, "file_code_123")
+        assert len(widgets) == 4
+        row = widgets[1]["value"][0]
+        assert len(row) == 4
+        assert row[0]["id"] == INS_UNITS_NAME
+        assert row[0]["value"] == "单位A"
+        assert row[1]["id"] == INS_HEADCOUNT
+        assert row[1]["type"] == "number"
+        assert isinstance(row[1]["value"], int)
+        assert row[2]["id"] == CAIHONG_INS_SUBTOTAL
+        assert row[2]["type"] == "amount"
+        assert row[3]["id"] == CAIHONG_INS_NOTE
+        assert row[3]["type"] == "text"
+        assert row[3]["value"] == CAIHONG_INS_NOTE_VALUE
+
+    def test_subtotal_is_row_total_last_fee(self):
+        """小计金额必须取最后一列行合计，而不是第一列费用。"""
+        sheet = self._make_sheet(
+            [("已参保-合计（0.2%）", "34.47"), ("缴费合计", "35.91")]
+        )
+        widgets = build_caihong_insurance_form_widgets(sheet, "file_code_123")
+        row = widgets[1]["value"][0]
+        assert row[2]["value"] == "35.91"
+
+    def test_detail_pairs_left_empty(self):
+        """明细1~16 留空：行内不出现任何预留明细控件。"""
+        sheet = self._make_sheet(
+            [("已参保-合计", "3366.66"), ("转款-合计", "3366.66")]
+        )
+        widgets = build_caihong_insurance_form_widgets(sheet, "file_code_123")
+        reserved_ids = {
+            wid for pair in CAIHONG_DETAIL_WIDGET_PAIRS for wid in pair
+        }
+        for detail_row in widgets[1]["value"]:
+            assert all(w["id"] not in reserved_ids for w in detail_row)
+
+    def test_empty_fees_raises(self):
+        """没有费用列的行无法确定行合计，应报错。"""
+        sheet = self._make_sheet([])
+        with pytest.raises(ValueError, match="无法填写小计金额"):
+            build_caihong_insurance_form_widgets(sheet, "file_code_123")
+
+    def test_json_serializable(self):
+        """Test that widget list is JSON serializable."""
+        sheet = self._make_sheet([("缴费合计", "35.91")])
+        widgets = build_caihong_insurance_form_widgets(sheet, "file_code_123")
+        parsed = json.loads(json.dumps(widgets, ensure_ascii=False))
+        assert len(parsed) == 4

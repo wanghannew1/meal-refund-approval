@@ -39,6 +39,7 @@ from app.form_builder import (
     build_form_widgets,
     build_bonus_form_widgets,
     build_insurance_form_widgets,
+    build_caihong_insurance_form_widgets,
 )
 from app.feishu_api import (
     get_tenant_token,
@@ -112,17 +113,22 @@ def _require_env_code(name: str, label: str) -> str:
 
 # 五险一金按公司主体路由到不同审批定义。Code 全部来自环境变量，
 # 代码中不硬编码审批定义 UUID；新增主体只需在此登记一行。
-INSURANCE_ENTITIES: dict[str, dict[str, str]] = {
+# 各主体表单明细行控件结构不同，用 form_builder 指向各自的构建函数：
+# 分公司表每行为 费用名称/金额 17 对；彩虹表 2026-11 改版后每行只有
+# 小计金额（行合计）+ 明细1~16（预留未填）。
+INSURANCE_ENTITIES: dict[str, dict] = {
     "branch": {
         "label": "分公司",
         "env": "FEISHU_INSURANCE_BRANCH_APPROVAL_CODE",
         # 旧部署只配了统一名称，继续兼容分公司主体
         "legacy_env": "FEISHU_INSURANCE_APPROVAL_CODE",
+        "form_builder": build_insurance_form_widgets,
     },
     "caihong": {
         "label": "彩虹公司",
         "env": "FEISHU_INSURANCE_CAIHONG_APPROVAL_CODE",
         "legacy_env": "",
+        "form_builder": build_caihong_insurance_form_widgets,
     },
 }
 
@@ -734,7 +740,9 @@ def render_step4_actions():
                 if kind == "bonus":
                     build_widgets = build_bonus_form_widgets
                 elif kind == "insurance":
-                    build_widgets = build_insurance_form_widgets
+                    build_widgets = get_insurance_entity(
+                        st.session_state.approval_entity
+                    )["form_builder"]
                 else:
                     build_widgets = build_form_widgets
 
@@ -815,7 +823,9 @@ def render_step4_actions():
     if kind == "bonus":
         build_widgets = build_bonus_form_widgets
     elif kind == "insurance":
-        build_widgets = build_insurance_form_widgets
+        build_widgets = get_insurance_entity(st.session_state.approval_entity)[
+            "form_builder"
+        ]
     else:
         build_widgets = build_form_widgets
 
