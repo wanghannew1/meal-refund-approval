@@ -84,7 +84,9 @@ if "tmp_file_path" not in st.session_state:
 if "approval_kind" not in st.session_state:
     st.session_state.approval_kind = "meal"
 if "approval_entity" not in st.session_state:
-    st.session_state.approval_entity = "branch"
+    # 默认彩虹公司，与 DEFAULT_INSURANCE_ENTITY 保持一致
+    # （此处位于该常量定义之前，只能写字面量）。
+    st.session_state.approval_entity = "caihong"
 if "uploaded_filename" not in st.session_state:
     st.session_state.uploaded_filename = None
 if "uploaded_file_sig" not in st.session_state:
@@ -116,7 +118,14 @@ def _require_env_code(name: str, label: str) -> str:
 # 各主体表单明细行控件结构不同，用 form_builder 指向各自的构建函数：
 # 分公司表每行为 费用名称/金额 17 对；彩虹表 2026-11 改版后每行只有
 # 小计金额（行合计）+ 明细1~16（预留未填）。
+# 注册表顺序即「公司主体」选择器的选项顺序：彩虹公司放左侧。
 INSURANCE_ENTITIES: dict[str, dict] = {
+    "caihong": {
+        "label": "彩虹公司",
+        "env": "FEISHU_INSURANCE_CAIHONG_APPROVAL_CODE",
+        "legacy_env": "",
+        "form_builder": build_caihong_insurance_form_widgets,
+    },
     "branch": {
         "label": "分公司",
         "env": "FEISHU_INSURANCE_BRANCH_APPROVAL_CODE",
@@ -124,19 +133,13 @@ INSURANCE_ENTITIES: dict[str, dict] = {
         "legacy_env": "FEISHU_INSURANCE_APPROVAL_CODE",
         "form_builder": build_insurance_form_widgets,
     },
-    "caihong": {
-        "label": "彩虹公司",
-        "env": "FEISHU_INSURANCE_CAIHONG_APPROVAL_CODE",
-        "legacy_env": "",
-        "form_builder": build_caihong_insurance_form_widgets,
-    },
 }
 
-DEFAULT_INSURANCE_ENTITY = "branch"
+DEFAULT_INSURANCE_ENTITY = "caihong"
 
 
 def get_insurance_entity(entity: str) -> dict[str, str]:
-    """Return the entity registry entry, falling back to 分公司."""
+    """Return the entity registry entry, falling back to 彩虹公司（默认主体）."""
     return INSURANCE_ENTITIES.get(entity, INSURANCE_ENTITIES[DEFAULT_INSURANCE_ENTITY])
 
 
