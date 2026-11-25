@@ -156,6 +156,23 @@ def get_default_insurance_entity() -> str:
     return next(iter(visible_insurance_entities()))
 
 
+# 五险一金审批入口暂时整体下线（2026-11-25，含分公司与彩虹公司）：
+# 上传/解析/表单构建/提交代码全部保留，仅从「审批类型」选择器隐藏。
+# 恢复上线改回 True 即可；各主体的单独开关见 CAIHONG_INSURANCE_ENABLED。
+INSURANCE_KIND_ENABLED = False
+
+
+def visible_kind_options() -> list[tuple[str, str]]:
+    """(label, kind) pairs exposed in the 审批类型 selector, in display order."""
+    options = [
+        ("派遣员工简易费用明细表审批", "meal"),
+        ("奖金发放审批", "bonus"),
+    ]
+    if INSURANCE_KIND_ENABLED:
+        options.append(("五险一金审批", "insurance"))
+    return options
+
+
 def get_insurance_entity(entity: str) -> dict[str, str]:
     """Return the entity registry entry, falling back to 彩虹公司（默认主体）."""
     return INSURANCE_ENTITIES.get(entity, INSURANCE_ENTITIES[DEFAULT_INSURANCE_ENTITY])
@@ -963,6 +980,15 @@ def render_step4_actions():
 # ---------------------------------------------------------------------------
 def main():
     """Main entry point."""
+    kind_options = visible_kind_options()
+    kind_keys = [k for _, k in kind_options]
+
+    # 已隐藏的类型（五险一金暂时整体下线）不再路由：旧会话残留的隐藏
+    # 类型归位到默认类型并清空已上传数据，避免标题/侧边栏闪现旧类型。
+    if st.session_state.approval_kind not in kind_keys:
+        st.session_state.approval_kind = kind_keys[0]
+        _reset_sheet_state()
+
     # 已隐藏的主体（如彩虹公司）不再路由：旧会话残留的隐藏主体直接
     # 归位到第一个可见主体，避免标题/侧边栏闪现隐藏主体名称。
     if st.session_state.approval_entity not in visible_insurance_entities():
@@ -988,18 +1014,13 @@ def main():
     if not render_login_gate():
         return
 
-    # Approval type selector
+    # Approval type selector：仅展示可见类型（五险一金暂时整体下线，代码保留）。
     kind_label = st.radio(
         "审批类型",
-        ["派遣员工简易费用明细表审批", "奖金发放审批", "五险一金审批"],
+        [label for label, _ in kind_options],
         horizontal=True,
     )
-    if kind_label == "派遣员工简易费用明细表审批":
-        new_kind = "meal"
-    elif kind_label == "奖金发放审批":
-        new_kind = "bonus"
-    else:
-        new_kind = "insurance"
+    new_kind = dict(kind_options)[kind_label]
     if new_kind != st.session_state.approval_kind:
         st.session_state.approval_kind = new_kind
         _reset_sheet_state()
