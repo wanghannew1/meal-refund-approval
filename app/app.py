@@ -84,8 +84,8 @@ if "tmp_file_path" not in st.session_state:
 if "approval_kind" not in st.session_state:
     st.session_state.approval_kind = "meal"
 if "approval_entity" not in st.session_state:
-    # 默认彩虹公司，与 DEFAULT_INSURANCE_ENTITY 保持一致
-    # （此处位于该常量定义之前，只能写字面量）。
+    # 初值写 DEFAULT_INSURANCE_ENTITY 对应的字面量（此处位于常量定义之前）。
+    # 若该主体被隐藏（彩虹公司暂时停用），main() 会归位到第一个可见主体。
     st.session_state.approval_entity = "caihong"
 if "uploaded_filename" not in st.session_state:
     st.session_state.uploaded_filename = None
@@ -119,12 +119,17 @@ def _require_env_code(name: str, label: str) -> str:
 # 分公司表每行为 费用名称/金额 17 对；彩虹表 2026-11 改版后每行只有
 # 小计金额（行合计）+ 明细1~16（预留未填）。
 # 注册表顺序即「公司主体」选择器的选项顺序：彩虹公司放左侧。
+# 彩虹公司五险一金暂时停用（2026-11-25）：解析/表单/提交代码全部保留，
+# 仅隐藏「公司主体」选择器入口。恢复上线时改回 True。
+CAIHONG_INSURANCE_ENABLED = False
+
 INSURANCE_ENTITIES: dict[str, dict] = {
     "caihong": {
         "label": "彩虹公司",
         "env": "FEISHU_INSURANCE_CAIHONG_APPROVAL_CODE",
         "legacy_env": "",
         "form_builder": build_caihong_insurance_form_widgets,
+        "enabled": CAIHONG_INSURANCE_ENABLED,
     },
     "branch": {
         "label": "分公司",
@@ -132,10 +137,23 @@ INSURANCE_ENTITIES: dict[str, dict] = {
         # 旧部署只配了统一名称，继续兼容分公司主体
         "legacy_env": "FEISHU_INSURANCE_APPROVAL_CODE",
         "form_builder": build_insurance_form_widgets,
+        "enabled": True,
     },
 }
 
 DEFAULT_INSURANCE_ENTITY = "caihong"
+
+
+def visible_insurance_entities() -> dict[str, dict]:
+    """Registry entries exposed in the 公司主体 selector (enabled only)."""
+    return {k: m for k, m in INSURANCE_ENTITIES.items() if m.get("enabled", True)}
+
+
+def get_default_insurance_entity() -> str:
+    """First visible entity, so a hidden default never routes submissions."""
+    if DEFAULT_INSURANCE_ENTITY in visible_insurance_entities():
+        return DEFAULT_INSURANCE_ENTITY
+    return next(iter(visible_insurance_entities()))
 
 
 def get_insurance_entity(entity: str) -> dict[str, str]:
@@ -945,6 +963,11 @@ def render_step4_actions():
 # ---------------------------------------------------------------------------
 def main():
     """Main entry point."""
+    # 已隐藏的主体（如彩虹公司）不再路由：旧会话残留的隐藏主体直接
+    # 归位到第一个可见主体，避免标题/侧边栏闪现隐藏主体名称。
+    if st.session_state.approval_entity not in visible_insurance_entities():
+        st.session_state.approval_entity = get_default_insurance_entity()
+
     render_sidebar()
 
     kind = st.session_state.approval_kind
@@ -984,9 +1007,11 @@ def main():
 
     # 五险一金主体选择器：分公司 / 彩虹公司路由到不同审批定义。
     # 解析结果与主体无关，切换主体不清空已上传数据，仅切换提交路由。
+    # 仅展示 enabled 的主体（彩虹公司暂时停用，代码保留）。
     if new_kind == "insurance":
-        entity_keys = list(INSURANCE_ENTITIES)
-        entity_labels = [INSURANCE_ENTITIES[k]["label"] for k in entity_keys]
+        visible_entities = visible_insurance_entities()
+        entity_keys = list(visible_entities)
+        entity_labels = [visible_entities[k]["label"] for k in entity_keys]
         current_entity = st.session_state.approval_entity
         default_idx = entity_keys.index(current_entity) if current_entity in entity_keys else 0
         entity_choice = st.radio(
