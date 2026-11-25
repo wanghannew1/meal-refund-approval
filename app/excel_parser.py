@@ -1473,9 +1473,10 @@ def parse_insurance_excel(
 # 两列金额明细表（派遣员工简易费用明细表审批-两列金额）
 #
 # 新审批流程专用解析器，与在用的 parse_meal_refund_excel 完全独立。
-# 表头：序号 / 姓名 / 身份证号 + 任意两个金额列（列名不固定，
-# 例如「单位工会经费」「工会会费」），金额列名会带回给审批表单的
-# 「列名称映射」控件。末行 合计 行按列校验。
+# 表头：姓名 必填；序号 / 身份证号 / 第二金额列均可省略（单金额列表
+# 也能走本流程）。金额列名不固定（如「单位工会经费」「工会会费」），
+# 会带回给审批表单的「列名称映射」控件；缺失的列在表单里省略对应
+# 控件（表单子控件均为非必填）。末行 合计 行按列校验。
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -1522,6 +1523,10 @@ class MealTwoAmountSheet:
     amount1_total: str
     amount2_total: str
     maker: str
+    # 源表缺少对应列时为 False：表单/预览据此省略控件。
+    # amount2_column 为空串表示单金额列。
+    has_id_column: bool = True
+    has_serial: bool = True
     warnings: list[str] = field(default_factory=list)
 
 
@@ -1532,11 +1537,12 @@ def parse_meal_two_amount_excel(
 ) -> MealTwoAmountSheet:
     """Parse a two-amount-column detail spreadsheet.
 
-    Header row is located by matching 序号 / 姓名 / 身份证号 by name;
-    the first two remaining non-empty header cells to the right of the
-    recognized columns are taken as the two amount columns (their
-    header text is recorded for the 列名称映射 widget). Column order
-    is flexible; extra columns to the right are ignored with a warning.
+    Header row is located by the 姓名 column (required); 序号 /
+    身份证号 columns are optional. The remaining non-empty header
+    cells are taken as amount columns — one or two are supported
+    (single-amount sheets work too; extra columns beyond two are
+    ignored with a warning). Amount column header text is recorded
+    for the 列名称映射 widget. Column order is flexible.
 
     Sheet selection and total-row handling mirror
     ``parse_meal_refund_excel`` (合计/总计 row, 签字 guard, maker scan).
@@ -1563,9 +1569,11 @@ def parse_meal_two_amount_excel(
     else:
         raise ValueError(f"不支持的文件格式: {suffix}，仅支持 .xls 和 .xlsx")
 
-    # Locate header row: 序号/姓名/身份证号 by name, plus two amount columns.
+    # Locate header row: 姓名 by name (required); 序号/身份证号 optional;
+    # 1~2 amount columns from the remaining non-empty header cells.
     header_row_idx: int | None = None
     idx_serial = idx_name = idx_id = -1
+    has_serial = has_id = False
     amount_cols: list[int] = []
     for idx, row in enumerate(all_rows):
         candidate: dict[str, int] = {}
@@ -1573,31 +1581,42 @@ def parse_meal_two_amount_excel(
             field_name = _resolve_meal_header(cell)
             if field_name is not None and field_name not in candidate:
                 candidate[field_name] = col_idx
-        if not {"serial", "name", "id_card"}.issubset(candidate):
+        if "name" not in candidate:
             continue
-        idx_serial = candidate["serial"]
+        idx_serial = candidate.get("serial", -1)
         idx_name = candidate["name"]
-        idx_id = candidate["id_card"]
+        idx_id = candidate.get("id_card", -1)
+        has_serial = idx_serial >= 0
+        has_id = idx_id >= 0
         recognized = set(candidate.values())
-        amount_cols = [
-            c
-            for c, cell in enumerate(row)
-            if c not in recognized
-            and cell is not None
-            and str(cell).strip() != ""
-        ]
-        if len(amount_cols) >= 2:
+        # 金额列候选：显式的「金额」表头优先，其次为未识别的非空表头列
+        # （如「单位工会经费」「工会会费」）。
+        amount_candidates: list[int] = []
+        unrecognized_cols: list[int] = []
+        for c, cell in enumerate(row):
+            if c in recognized:
+                if _resolve_meal_header(cell) == "amount":
+                    amount_candidates.append(c)
+                continue
+            if cell is not None and str(cell).strip() != "":
+                unrecognized_cols.append(c)
+        amount_cols = amount_candidates + unrecognized_cols
+        if len(amount_cols) >= 1:
             header_row_idx = idx
             break
 
     if header_row_idx is None:
         raise ValueError(
-            '未找到表头行（需要包含"序号""姓名""身份证号"列，且其右侧有两个金额列）'
+            '未找到表头行（需包含"姓名"列和至少一个金额列；序号、身份证号、'
+            '第二金额列可省略）'
         )
 
-    idx_a1, idx_a2 = amount_cols[0], amount_cols[1]
+    idx_a1 = amount_cols[0]
+    idx_a2 = amount_cols[1] if len(amount_cols) > 1 else None
     amount1_column = str(all_rows[header_row_idx][idx_a1]).strip()
-    amount2_column = str(all_rows[header_row_idx][idx_a2]).strip()
+    amount2_column = (
+        str(all_rows[header_row_idx][idx_a2]).strip() if idx_a2 is not None else ""
+    )
     if len(amount_cols) > 2:
         extra = "、".join(
             str(all_rows[header_row_idx][c]).strip() for c in amount_cols[2:]
@@ -1606,7 +1625,18 @@ def parse_meal_two_amount_excel(
     else:
         extra_note = ""
 
-    max_needed = max(idx_serial, idx_name, idx_id, idx_a1, idx_a2)
+    needed_cols = [idx_name, idx_a1]
+    if has_serial:
+        needed_cols.append(idx_serial)
+    if has_id:
+        needed_cols.append(idx_id)
+    if idx_a2 is not None:
+        needed_cols.append(idx_a2)
+    max_needed = max(needed_cols)
+
+    # 合计/签字 guard reads the leftmost identity column: 序号 when
+    # present, otherwise the 姓名 column (合计 often merges from col 0).
+    guard_idx = idx_serial if has_serial else idx_name
 
     rows: list[MealTwoAmountRow] = []
     warnings: list[str] = []
@@ -1622,17 +1652,18 @@ def parse_meal_two_amount_excel(
         while len(row) <= max_needed:
             row.append(None)
 
-        col0_raw = row[idx_serial]
+        guard_raw = row[guard_idx]
 
         # 合计 / 总计 total row
-        col0_str = str(col0_raw).strip() if col0_raw is not None else ""
-        if col0_str in ("总计", "合计"):
+        guard_str = str(guard_raw).strip() if guard_raw is not None else ""
+        if guard_str in ("总计", "合计"):
             amount1_total = _extract_total_amount(
                 str(row[idx_a1]).strip() if row[idx_a1] is not None else ""
             )
-            amount2_total = _extract_total_amount(
-                str(row[idx_a2]).strip() if row[idx_a2] is not None else ""
-            )
+            if idx_a2 is not None:
+                amount2_total = _extract_total_amount(
+                    str(row[idx_a2]).strip() if row[idx_a2] is not None else ""
+                )
 
             # Maker scan mirrors parse_meal_refund_excel.
             for subsequent_idx in range(idx + 1, min(idx + 8, len(all_rows))):
@@ -1651,14 +1682,14 @@ def parse_meal_two_amount_excel(
             break
 
         # Signature-row guard.
-        if "签字" in col0_str:
+        if "签字" in guard_str:
             break
 
         if _is_blank_row(row):
             skipped_count += 1
             continue
 
-        serial_str, _ = _normalize_numeric(col0_raw)
+        serial_str, _ = _normalize_numeric(row[idx_serial]) if has_serial else ("", False)
         name = str(row[idx_name]).strip() if row[idx_name] is not None else ""
         if not name:
             skipped_count += 1
@@ -1666,11 +1697,14 @@ def parse_meal_two_amount_excel(
 
         name_counts[name] = name_counts.get(name, 0) + 1
 
-        id_card, id_was_numeric = _normalize_id_card(row[idx_id])
-        if id_was_numeric:
-            warnings.append(
-                f"第{idx + 1}行身份证号码为数字格式，可能丢失精度: {id_card}"
-            )
+        if has_id:
+            id_card, id_was_numeric = _normalize_id_card(row[idx_id])
+            if id_was_numeric:
+                warnings.append(
+                    f"第{idx + 1}行身份证号码为数字格式，可能丢失精度: {id_card}"
+                )
+        else:
+            id_card, id_was_numeric = "", False
 
         rows.append(
             MealTwoAmountRow(
@@ -1678,7 +1712,7 @@ def parse_meal_two_amount_excel(
                 name=name,
                 id_card=id_card,
                 amount1=_normalize_money(row[idx_a1]),
-                amount2=_normalize_money(row[idx_a2]),
+                amount2=_normalize_money(row[idx_a2]) if idx_a2 is not None else "0",
             )
         )
 
@@ -1701,7 +1735,7 @@ def parse_meal_two_amount_excel(
         (amount1_column, amount1_total, "amount1"),
         (amount2_column, amount2_total, "amount2"),
     ):
-        if not total_raw:
+        if not label or not total_raw:
             continue
         try:
             row_sum = sum(Decimal(getattr(r, attr)) for r in rows)
@@ -1718,6 +1752,8 @@ def parse_meal_two_amount_excel(
         rows=rows,
         amount1_column=amount1_column,
         amount2_column=amount2_column,
+        has_id_column=has_id,
+        has_serial=has_serial,
         amount1_total=amount1_total,
         amount2_total=amount2_total,
         maker=maker,

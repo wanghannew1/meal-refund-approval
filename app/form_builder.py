@@ -490,10 +490,14 @@ def build_meal2_form_widgets(
     The approval definition contains an extra required top-level
     「列名称映射」 fieldList that maps the form's 金额1/金额2 columns to
     the original Excel column headers; its rows are filled from
-    ``sheet.amount1_column`` / ``sheet.amount2_column``.
+    ``sheet.amount1_column`` / ``sheet.amount2_column``. All form
+    children are optional (required: false), so when the source sheet
+    lacks the id-card column or the second amount column, the
+    corresponding child widgets and mapping row are omitted entirely.
 
     Detail rows carry 姓名/身份证号码/金额1/金额2 in the fieldList
-    children order — the form has no 序号 widget.
+    children order (missing columns omitted) — the form has no 序号
+    widget.
 
     Args:
         sheet: Parsed two-amount-column spreadsheet data.
@@ -506,6 +510,7 @@ def build_meal2_form_widgets(
         column mapping (fieldList), detail list (fieldList),
         attachment (attachmentV2), remark (textarea).
     """
+    # 列名称映射：金额2 行仅在源表确有第二金额列时携带。
     mapping_rows: list[list[dict]] = [
         [
             {
@@ -518,47 +523,58 @@ def build_meal2_form_widgets(
                 "type": "input",
                 "value": sheet.amount1_column,
             },
-        ],
-        [
-            {
-                "id": MEAL2_MAPPING_FORM_COLUMN,
-                "type": "input",
-                "value": "金额2",
-            },
-            {
-                "id": MEAL2_MAPPING_EXCEL_COLUMN,
-                "type": "input",
-                "value": sheet.amount2_column,
-            },
-        ],
+        ]
     ]
+    if sheet.amount2_column:
+        mapping_rows.append(
+            [
+                {
+                    "id": MEAL2_MAPPING_FORM_COLUMN,
+                    "type": "input",
+                    "value": "金额2",
+                },
+                {
+                    "id": MEAL2_MAPPING_EXCEL_COLUMN,
+                    "type": "input",
+                    "value": sheet.amount2_column,
+                },
+            ]
+        )
 
     detail_rows: list[list[dict]] = []
     for row in sheet.rows:
-        detail_rows.append(
-            [
-                {
-                    "id": MEAL2_ROW_NAME,
-                    "type": "input",
-                    "value": row.name,
-                },
+        detail_row: list[dict] = [
+            {
+                "id": MEAL2_ROW_NAME,
+                "type": "input",
+                "value": row.name,
+            }
+        ]
+        # 身份证号 / 金额2 控件在源表缺列时整列省略（均为非必填控件）。
+        if sheet.has_id_column:
+            detail_row.append(
                 {
                     "id": MEAL2_ROW_ID_CARD,
                     "type": "input",
                     "value": row.id_card,
-                },
-                {
-                    "id": MEAL2_ROW_AMOUNT1,
-                    "type": "amount",
-                    "value": row.amount1,
-                },
+                }
+            )
+        detail_row.append(
+            {
+                "id": MEAL2_ROW_AMOUNT1,
+                "type": "amount",
+                "value": row.amount1,
+            }
+        )
+        if sheet.amount2_column:
+            detail_row.append(
                 {
                     "id": MEAL2_ROW_AMOUNT2,
                     "type": "amount",
                     "value": row.amount2,
-                },
-            ]
-        )
+                }
+            )
+        detail_rows.append(detail_row)
 
     return [
         {

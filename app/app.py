@@ -493,7 +493,7 @@ def render_step1_upload():
         st.caption("模板已脱敏（不含真实个人信息）；请保留表头与合计行结构后填写。")
         st.caption("返餐费末行写『总计』，工会会费末行写『合计』；工会会费多出的合计列可忽略。")
         st.caption("五险一金请使用对应的分单位模板（医保/社保/工伤/公积金），每月一个 sheet 或一个文件均可。")
-        st.caption("两列金额：表头需含 序号/姓名/身份证号 及右侧两个金额列，末行为合计行。")
+        st.caption("两列金额：表头需含 姓名 和至少一个金额列；序号、身份证号、第二金额列可省略，单金额列表也可上传。末行合计行可选，有则自动校验。")
 
     kind = st.session_state.approval_kind
     if kind == "bonus":
@@ -666,15 +666,19 @@ def _build_preview_data(kind, sheet):
     """Build preview dataframe rows for a parsed sheet."""
     data = []
     if kind == "meal2":
-        for row in sheet.rows:
-            data.append({
-                "序号": row.serial,
+        # 列名跟随原始 Excel 表头，与「列名称映射」一致；
+        # 源表缺列（序号/身份证号/第二金额列）时预览同步省略。
+        for i, row in enumerate(sheet.rows, start=1):
+            item = {
+                "序号": row.serial if sheet.has_serial else str(i),
                 "姓名": row.name,
-                "身份证号码": row.id_card,
-                # 列名跟随原始 Excel 表头，与「列名称映射」一致
-                sheet.amount1_column: row.amount1,
-                sheet.amount2_column: row.amount2,
-            })
+            }
+            if sheet.has_id_column:
+                item["身份证号码"] = row.id_card
+            item[sheet.amount1_column] = row.amount1
+            if sheet.amount2_column:
+                item[sheet.amount2_column] = row.amount2
+            data.append(item)
     elif kind == "bonus":
         for row in sheet.rows:
             data.append({
@@ -710,7 +714,8 @@ def _render_sheet_totals(kind, sheet):
     """Render total lines for a parsed sheet."""
     if kind == "meal2":
         st.markdown(f"**{sheet.amount1_column}合计：** {sheet.amount1_total or '—'}")
-        st.markdown(f"**{sheet.amount2_column}合计：** {sheet.amount2_total or '—'}")
+        if sheet.amount2_column:
+            st.markdown(f"**{sheet.amount2_column}合计：** {sheet.amount2_total or '—'}")
     elif kind == "bonus":
         st.markdown(f"**奖金合计：** {sheet.bonus_total}")
         st.markdown(f"**个人所得税合计：** {sheet.tax_total}")
@@ -1043,7 +1048,7 @@ def main():
         st.markdown("上传五险一金分单位明细表，自动解析并提交飞书审批流程。")
     elif kind == "meal2":
         st.title("派遣员工简易费用明细表审批提交工具（两列金额）")
-        st.markdown("适用于每行带两个金额列的明细表（如单位工会经费、工会会费）。表头需含序号、姓名、身份证号及右侧两个金额列，末行为合计行；审批表单的「列名称映射」按上传表的列名自动填写。")
+        st.markdown("适用于一至两个金额列的明细表（如单位工会经费、工会会费，单金额列表亦可）。表头至少含 姓名 和一个金额列，序号、身份证号、第二金额列可省略；末行合计行可选，有则自动校验。审批表单的「列名称映射」按上传表的列名自动填写。")
     else:
         st.title("派遣员工简易费用明细表审批提交工具")
         st.markdown("适用于手工制作的退返餐费、工会会费等简易费用表。表中除序号、姓名、身份证号外，仅设一列金额，表格末尾为合计金额。审批顺序：夏璠→张宇佳→蒿敬恪。")

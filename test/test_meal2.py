@@ -189,3 +189,116 @@ class TestBuildMeal2FormWidgets:
     def test_json_serializable(self):
         widgets = build_meal2_form_widgets(self._sample_sheet(), file_code="FC")
         json.dumps(widgets, ensure_ascii=False)
+
+
+class TestRelaxedSheets:
+    """放宽后的表头兼容：姓名必填，序号/身份证号/第二金额列可省略。"""
+
+    def _write(self, path: Path, header: list, data_rows: list, total_row: list | None = None) -> None:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "简化明细表"
+        ws.append([])
+        ws.append(header)
+        for r in data_rows:
+            ws.append(r)
+        if total_row is not None:
+            ws.append(total_row)
+        wb.save(path)
+
+    def test_name_only_single_amount(self, tmp_path: Path):
+        path = tmp_path / "name_only.xlsx"
+        self._write(
+            path,
+            ["姓名", "工会会费"],
+            [["张三", 11], ["李四", 10]],
+            ["合计", 21],
+        )
+        sheet = parse_meal_two_amount_excel(path)
+        assert len(sheet.rows) == 2
+        assert sheet.amount1_column == "工会会费"
+        assert sheet.amount2_column == ""
+        assert sheet.rows[0].amount1 == "11"
+        assert sheet.rows[0].amount2 == "0"
+        assert sheet.has_serial is False
+        assert sheet.has_id_column is False
+        assert sheet.amount1_total == "21"
+        assert sheet.warnings == []
+
+    def test_name_serial_no_id(self, tmp_path: Path):
+        path = tmp_path / "no_id.xlsx"
+        self._write(
+            path,
+            ["序号", "姓名", "金额"],
+            [[1, "张三", 61.8], [2, "李四", 57.8]],
+            ["合计", "", 119.6],
+        )
+        sheet = parse_meal_two_amount_excel(path)
+        assert sheet.has_serial is True
+        assert sheet.has_id_column is False
+        assert sheet.rows[0].serial == "1"
+        assert sheet.rows[0].id_card == ""
+        assert sheet.amount1_total == "119.6"
+
+    def test_total_in_name_column_without_serial(self, tmp_path: Path):
+        # 无序号列时，合计标签落在姓名列（合并单元格从最左列起）
+        path = tmp_path / "total_name_col.xlsx"
+        self._write(
+            path,
+            ["姓名", "工会会费"],
+            [["张三", 11], ["李四", 10]],
+            [None, 21],  # 合并后姓名列读 None → 用金额合计校验路径
+        )
+        wb = openpyxl.load_workbook(path)
+        ws = wb.active
+        ws.cell(row=6, column=1, value="合计")
+        wb.save(path)
+        sheet = parse_meal_two_amount_excel(path)
+        assert len(sheet.rows) == 2  # 合计行未被当作数据
+        assert sheet.amount1_total == "21"
+
+    def test_builder_omits_missing_columns(self):
+        sheet = MealTwoAmountSheet(
+            title="单金额",
+            rows=[
+                MealTwoAmountRow(serial="", name="张三", id_card="", amount1="11", amount2="0"),
+            ],
+            amount1_column="工会会费",
+            amount2_column="",
+            amount1_total="11",
+            amount2_total="",
+            maker="",
+            has_id_column=False,
+            has_serial=False,
+        )
+        widgets = build_meal2_form_widgets(sheet, file_code="FC")
+        # 映射只有一行（金额1）
+        assert len(widgets[1]["value"]) == 1
+        assert widgets[1]["value"][0][1]["value"] == "工会会费"
+        # 明细行：姓名 + 金额1，无身份证/金额2
+        row0 = widgets[2]["value"][0]
+        assert [c["id"] for c in row0] == [MEAL2_ROW_NAME, MEAL2_ROW_AMOUNT1]
+        assert [c["value"] for c in row0] == ["张三", "11"]
+
+    def test_builder_keeps_id_when_column_present(self):
+        sheet = MealTwoAmountSheet(
+            title="单金额有身份证",
+            rows=[
+                MealTwoAmountRow(serial="1", name="张三", id_card="220104198302271331", amount1="11", amount2="0"),
+            ],
+            amount1_column="工会会费",
+            amount2_column="",
+            amount1_total="11",
+            amount2_total="",
+            maker="",
+            has_id_column=True,
+            has_serial=True,
+        )
+        widgets = build_meal2_form_widgets(sheet, file_code="FC")
+        row0 = widgets[2]["value"][0]
+        assert [c["id"] for c in row0] == [
+            MEAL2_ROW_NAME,
+            MEAL2_ROW_ID_CARD,
+            MEAL2_ROW_AMOUNT1,
+        ]
+        assert len(widgets[1]["value"]) == 1  # 映射仍只有金额1
