@@ -1467,3 +1467,259 @@ def parse_insurance_excel(
                 break
 
     return InsuranceSheet(title=title, rows=rows, maker=maker, warnings=warnings)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 两列金额明细表（派遣员工简易费用明细表审批-两列金额）
+#
+# 新审批流程专用解析器，与在用的 parse_meal_refund_excel 完全独立。
+# 表头：序号 / 姓名 / 身份证号 + 任意两个金额列（列名不固定，
+# 例如「单位工会经费」「工会会费」），金额列名会带回给审批表单的
+# 「列名称映射」控件。末行 合计 行按列校验。
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@dataclass(frozen=True)
+class MealTwoAmountRow:
+    """A single data row from a two-amount-column detail spreadsheet.
+
+    Attributes:
+        serial: Normalized serial number string (preview only; the
+            approval form has no serial widget).
+        name: Employee name.
+        id_card: Identity card number (text, may end in X).
+        amount1: First amount column value ("0" when blank).
+        amount2: Second amount column value ("0" when blank).
+    """
+
+    serial: str
+    name: str
+    id_card: str
+    amount1: str
+    amount2: str
+
+
+@dataclass(frozen=True)
+class MealTwoAmountSheet:
+    """Parsed result of a two-amount-column detail spreadsheet.
+
+    Attributes:
+        title: Sheet title from the first merged row.
+        rows: List of data rows.
+        amount1_column: Header text of the first amount column
+            (fed to the approval form's column-name mapping widget).
+        amount2_column: Header text of the second amount column.
+        amount1_total: 合计-row value of the first amount column.
+        amount2_total: 合计-row value of the second amount column.
+        maker: Name of the person who prepared the sheet.
+        warnings: List of warning messages (Chinese text).
+    """
+
+    title: str
+    rows: list[MealTwoAmountRow]
+    amount1_column: str
+    amount2_column: str
+    amount1_total: str
+    amount2_total: str
+    maker: str
+    warnings: list[str] = field(default_factory=list)
+
+
+def parse_meal_two_amount_excel(
+    path: str | Path,
+    sheet_name: str | None = None,
+    sheet_index: int | None = None,
+) -> MealTwoAmountSheet:
+    """Parse a two-amount-column detail spreadsheet.
+
+    Header row is located by matching 序号 / 姓名 / 身份证号 by name;
+    the first two remaining non-empty header cells to the right of the
+    recognized columns are taken as the two amount columns (their
+    header text is recorded for the 列名称映射 widget). Column order
+    is flexible; extra columns to the right are ignored with a warning.
+
+    Sheet selection and total-row handling mirror
+    ``parse_meal_refund_excel`` (合计/总计 row, 签字 guard, maker scan).
+
+    Args:
+        path: Path to the Excel file.
+        sheet_name: Optional sheet name to parse.
+        sheet_index: Optional 0-based sheet index to parse.
+
+    Returns:
+        MealTwoAmountSheet with parsed data.
+
+    Raises:
+        ValueError: If the file is unreadable, header not found, or no
+            data rows present.
+    """
+    path = Path(path)
+    suffix = path.suffix.lower()
+
+    if suffix == ".xls":
+        title, all_rows = _read_xls(path, sheet_name=sheet_name, sheet_index=sheet_index)
+    elif suffix == ".xlsx":
+        title, all_rows = _read_xlsx(path, sheet_name=sheet_name, sheet_index=sheet_index)
+    else:
+        raise ValueError(f"不支持的文件格式: {suffix}，仅支持 .xls 和 .xlsx")
+
+    # Locate header row: 序号/姓名/身份证号 by name, plus two amount columns.
+    header_row_idx: int | None = None
+    idx_serial = idx_name = idx_id = -1
+    amount_cols: list[int] = []
+    for idx, row in enumerate(all_rows):
+        candidate: dict[str, int] = {}
+        for col_idx, cell in enumerate(row):
+            field_name = _resolve_meal_header(cell)
+            if field_name is not None and field_name not in candidate:
+                candidate[field_name] = col_idx
+        if not {"serial", "name", "id_card"}.issubset(candidate):
+            continue
+        idx_serial = candidate["serial"]
+        idx_name = candidate["name"]
+        idx_id = candidate["id_card"]
+        recognized = set(candidate.values())
+        amount_cols = [
+            c
+            for c, cell in enumerate(row)
+            if c not in recognized
+            and cell is not None
+            and str(cell).strip() != ""
+        ]
+        if len(amount_cols) >= 2:
+            header_row_idx = idx
+            break
+
+    if header_row_idx is None:
+        raise ValueError(
+            '未找到表头行（需要包含"序号""姓名""身份证号"列，且其右侧有两个金额列）'
+        )
+
+    idx_a1, idx_a2 = amount_cols[0], amount_cols[1]
+    amount1_column = str(all_rows[header_row_idx][idx_a1]).strip()
+    amount2_column = str(all_rows[header_row_idx][idx_a2]).strip()
+    if len(amount_cols) > 2:
+        extra = "、".join(
+            str(all_rows[header_row_idx][c]).strip() for c in amount_cols[2:]
+        )
+        extra_note = f"（已忽略多余金额列：{extra}）"
+    else:
+        extra_note = ""
+
+    max_needed = max(idx_serial, idx_name, idx_id, idx_a1, idx_a2)
+
+    rows: list[MealTwoAmountRow] = []
+    warnings: list[str] = []
+    amount1_total = ""
+    amount2_total = ""
+    maker = ""
+    skipped_count = 0
+    name_counts: dict[str, int] = {}
+
+    data_start = header_row_idx + 1
+    for idx in range(data_start, len(all_rows)):
+        row = all_rows[idx]
+        while len(row) <= max_needed:
+            row.append(None)
+
+        col0_raw = row[idx_serial]
+
+        # 合计 / 总计 total row
+        col0_str = str(col0_raw).strip() if col0_raw is not None else ""
+        if col0_str in ("总计", "合计"):
+            amount1_total = _extract_total_amount(
+                str(row[idx_a1]).strip() if row[idx_a1] is not None else ""
+            )
+            amount2_total = _extract_total_amount(
+                str(row[idx_a2]).strip() if row[idx_a2] is not None else ""
+            )
+
+            # Maker scan mirrors parse_meal_refund_excel.
+            for subsequent_idx in range(idx + 1, min(idx + 8, len(all_rows))):
+                sub_row = all_rows[subsequent_idx]
+                for cell_idx in range(len(sub_row)):
+                    cell_text = (
+                        str(sub_row[cell_idx]).strip()
+                        if sub_row[cell_idx] is not None
+                        else ""
+                    )
+                    if "制表" in cell_text:
+                        maker = _extract_maker(cell_text)
+                        break
+                if maker:
+                    break
+            break
+
+        # Signature-row guard.
+        if "签字" in col0_str:
+            break
+
+        if _is_blank_row(row):
+            skipped_count += 1
+            continue
+
+        serial_str, _ = _normalize_numeric(col0_raw)
+        name = str(row[idx_name]).strip() if row[idx_name] is not None else ""
+        if not name:
+            skipped_count += 1
+            continue
+
+        name_counts[name] = name_counts.get(name, 0) + 1
+
+        id_card, id_was_numeric = _normalize_id_card(row[idx_id])
+        if id_was_numeric:
+            warnings.append(
+                f"第{idx + 1}行身份证号码为数字格式，可能丢失精度: {id_card}"
+            )
+
+        rows.append(
+            MealTwoAmountRow(
+                serial=serial_str,
+                name=name,
+                id_card=id_card,
+                amount1=_normalize_money(row[idx_a1]),
+                amount2=_normalize_money(row[idx_a2]),
+            )
+        )
+
+    if not rows:
+        raise ValueError("未找到数据行")
+
+    if extra_note:
+        warnings.append(f"表头有多个金额列{extra_note}")
+
+    dup_names = {n: c for n, c in name_counts.items() if c > 1}
+    if dup_names:
+        dup_parts = [f"{n}({c}次)" for n, c in sorted(dup_names.items())]
+        warnings.append(f"存在重复姓名: {', '.join(dup_parts)}（各行独立保留）")
+
+    if skipped_count > 0:
+        warnings.append(f"跳过 {skipped_count} 行（空行/缺姓名/签字行）")
+
+    # Per-column sum validation against the 合计 row.
+    for label, total_raw, attr in (
+        (amount1_column, amount1_total, "amount1"),
+        (amount2_column, amount2_total, "amount2"),
+    ):
+        if not total_raw:
+            continue
+        try:
+            row_sum = sum(Decimal(getattr(r, attr)) for r in rows)
+            expected = Decimal(total_raw)
+            if row_sum != expected:
+                warnings.append(
+                    f"{label}明细合计 ({row_sum}) 与表格合计 ({expected}) 不一致"
+                )
+        except InvalidOperation:
+            warnings.append(f"无法验证{label}合计（存在非数字金额）")
+
+    return MealTwoAmountSheet(
+        title=title,
+        rows=rows,
+        amount1_column=amount1_column,
+        amount2_column=amount2_column,
+        amount1_total=amount1_total,
+        amount2_total=amount2_total,
+        maker=maker,
+        warnings=warnings,
+    )

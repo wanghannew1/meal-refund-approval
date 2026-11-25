@@ -8,7 +8,12 @@ widget IDs of the meal refund approval form.
 
 from __future__ import annotations
 
-from app.excel_parser import BonusSheet, InsuranceSheet, MealRefundSheet
+from app.excel_parser import (
+    BonusSheet,
+    InsuranceSheet,
+    MealRefundSheet,
+    MealTwoAmountSheet,
+)
 
 # ── Verified widget IDs (from live approval definition) ──────────────
 WIDGET_TITLE = "widget17811628753290001"
@@ -452,6 +457,132 @@ def build_caihong_insurance_form_widgets(
         },
         {
             "id": WIDGET_REMARK,
+            "type": "textarea",
+            "value": remark,
+        },
+    ]
+
+
+# ── 派遣员工简易费用明细表审批-两列金额 widget IDs ────────────────────
+# （2026-11-25 从线上审批定义 63FBFB03-B321-4402-B85E-8404A18E6C2D
+#   实时抓取核实；与在用的单金额流程完全独立，互不影响。）
+MEAL2_TITLE = "widget17811628753290001"
+MEAL2_COLUMN_MAPPING = "widget17955716825010001"      # 列名称映射 fieldList（必填）
+MEAL2_MAPPING_FORM_COLUMN = "widget17955717008060001"  # 子控件：审批单中列名称
+MEAL2_MAPPING_EXCEL_COLUMN = "widget17955717607840001"  # 子控件：excel表中的列名称
+MEAL2_DETAIL_LIST = "widget16496685286700001"
+MEAL2_ROW_NAME = "widget17920477234030001"
+MEAL2_ROW_ID_CARD = "widget17920477572400001"
+MEAL2_ROW_AMOUNT1 = "widget17822958110070001"          # 金额1 (amount CNY)
+MEAL2_ROW_AMOUNT2 = "widget17955713713480001"          # 金额2 (amount CNY)
+MEAL2_ATTACHMENT = "widget16496686388470001"
+MEAL2_REMARK = "widget17811635300840001"
+
+
+def build_meal2_form_widgets(
+    sheet: MealTwoAmountSheet,
+    file_code: str,
+    title: str | None = None,
+    remark: str = "",
+) -> list[dict]:
+    """Build the widget list for the two-amount-column meal approval.
+
+    The approval definition contains an extra required top-level
+    「列名称映射」 fieldList that maps the form's 金额1/金额2 columns to
+    the original Excel column headers; its rows are filled from
+    ``sheet.amount1_column`` / ``sheet.amount2_column``.
+
+    Detail rows carry 姓名/身份证号码/金额1/金额2 in the fieldList
+    children order — the form has no 序号 widget.
+
+    Args:
+        sheet: Parsed two-amount-column spreadsheet data.
+        file_code: File code returned by the approval file upload API.
+        title: Optional override for the approval title.
+        remark: Optional remark text for the textarea widget.
+
+    Returns:
+        List of widget dicts ready for json.dumps(): title (input),
+        column mapping (fieldList), detail list (fieldList),
+        attachment (attachmentV2), remark (textarea).
+    """
+    mapping_rows: list[list[dict]] = [
+        [
+            {
+                "id": MEAL2_MAPPING_FORM_COLUMN,
+                "type": "input",
+                "value": "金额1",
+            },
+            {
+                "id": MEAL2_MAPPING_EXCEL_COLUMN,
+                "type": "input",
+                "value": sheet.amount1_column,
+            },
+        ],
+        [
+            {
+                "id": MEAL2_MAPPING_FORM_COLUMN,
+                "type": "input",
+                "value": "金额2",
+            },
+            {
+                "id": MEAL2_MAPPING_EXCEL_COLUMN,
+                "type": "input",
+                "value": sheet.amount2_column,
+            },
+        ],
+    ]
+
+    detail_rows: list[list[dict]] = []
+    for row in sheet.rows:
+        detail_rows.append(
+            [
+                {
+                    "id": MEAL2_ROW_NAME,
+                    "type": "input",
+                    "value": row.name,
+                },
+                {
+                    "id": MEAL2_ROW_ID_CARD,
+                    "type": "input",
+                    "value": row.id_card,
+                },
+                {
+                    "id": MEAL2_ROW_AMOUNT1,
+                    "type": "amount",
+                    "value": row.amount1,
+                },
+                {
+                    "id": MEAL2_ROW_AMOUNT2,
+                    "type": "amount",
+                    "value": row.amount2,
+                },
+            ]
+        )
+
+    return [
+        {
+            "id": MEAL2_TITLE,
+            "type": "input",
+            "value": title if title is not None else sheet.title,
+        },
+        {
+            "id": MEAL2_COLUMN_MAPPING,
+            "type": "fieldList",
+            "value": mapping_rows,
+        },
+        {
+            "id": MEAL2_DETAIL_LIST,
+            "type": "fieldList",
+            "value": detail_rows,
+        },
+        {
+            "id": MEAL2_ATTACHMENT,
+            "type": "attachmentV2",
+            "value": [file_code],
+        },
+        {
+            "id": MEAL2_REMARK,
             "type": "textarea",
             "value": remark,
         },

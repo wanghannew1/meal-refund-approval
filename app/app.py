@@ -27,6 +27,7 @@ if _env_path.exists():
 # Import core modules (implemented by parallel agent)
 from app.excel_parser import (
     parse_meal_refund_excel,
+    parse_meal_two_amount_excel,
     parse_bonus_excel,
     parse_insurance_excel,
     list_sheets,
@@ -37,6 +38,7 @@ from app.excel_parser import (
 )
 from app.form_builder import (
     build_form_widgets,
+    build_meal2_form_widgets,
     build_bonus_form_widgets,
     build_insurance_form_widgets,
     build_caihong_insurance_form_widgets,
@@ -167,6 +169,9 @@ def visible_kind_options() -> list[tuple[str, str]]:
     options = [
         ("派遣员工简易费用明细表审批", "meal"),
         ("奖金发放审批", "bonus"),
+        # 两列金额：2026-11 新增审批流程，独立解析器与表单构建，
+        # 不影响在用的单金额派遣员工流程。
+        ("派遣员工简易费用明细表审批-两列金额", "meal2"),
     ]
     if INSURANCE_KIND_ENABLED:
         options.append(("五险一金审批", "insurance"))
@@ -189,6 +194,11 @@ def get_approval_code(kind: str, entity: str = DEFAULT_INSURANCE_ENTITY) -> str:
     """
     if kind == "bonus":
         return _require_env_code("FEISHU_BONUS_APPROVAL_CODE", "奖金发放审批 Code")
+    if kind == "meal2":
+        # 两列金额派遣员工审批（2026-11 新增流程，独立于在用流程）
+        return _require_env_code(
+            "FEISHU_MEAL2_APPROVAL_CODE", "派遣员工简易费用明细表审批-两列金额 Code"
+        )
     if kind == "insurance":
         meta = get_insurance_entity(entity)
         code = os.getenv(meta["env"], "").strip()
@@ -228,6 +238,11 @@ def kind_meta(kind: str, entity: str = DEFAULT_INSURANCE_ENTITY) -> tuple[str, s
         return (
             "奖金发放审批",
             _require_env_code("FEISHU_BONUS_APPROVAL_CODE", "奖金发放审批 Code"),
+        )
+    if kind == "meal2":
+        return (
+            "派遣员工简易费用明细表审批-两列金额",
+            get_approval_code("meal2"),
         )
     if kind == "insurance":
         meta = get_insurance_entity(entity)
@@ -478,10 +493,13 @@ def render_step1_upload():
         st.caption("模板已脱敏（不含真实个人信息）；请保留表头与合计行结构后填写。")
         st.caption("返餐费末行写『总计』，工会会费末行写『合计』；工会会费多出的合计列可忽略。")
         st.caption("五险一金请使用对应的分单位模板（医保/社保/工伤/公积金），每月一个 sheet 或一个文件均可。")
+        st.caption("两列金额：表头需含 序号/姓名/身份证号 及右侧两个金额列，末行为合计行。")
 
     kind = st.session_state.approval_kind
     if kind == "bonus":
         label = "选择奖金明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）"
+    elif kind == "meal2":
+        label = "选择两列金额明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）"
     elif kind == "insurance":
         entity_label = get_insurance_entity(st.session_state.approval_entity)["label"]
         label = f"选择{entity_label}五险一金明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）"
@@ -520,6 +538,8 @@ def render_step1_upload():
             try:
                 if kind == "bonus":
                     sheet = parse_bonus_excel(tmp_file.name)
+                elif kind == "meal2":
+                    sheet = parse_meal_two_amount_excel(tmp_file.name)
                 elif kind == "insurance":
                     sheet = parse_insurance_excel(tmp_file.name)
                 else:
@@ -645,7 +665,17 @@ def render_step2_preview():
 def _build_preview_data(kind, sheet):
     """Build preview dataframe rows for a parsed sheet."""
     data = []
-    if kind == "bonus":
+    if kind == "meal2":
+        for row in sheet.rows:
+            data.append({
+                "序号": row.serial,
+                "姓名": row.name,
+                "身份证号码": row.id_card,
+                # 列名跟随原始 Excel 表头，与「列名称映射」一致
+                sheet.amount1_column: row.amount1,
+                sheet.amount2_column: row.amount2,
+            })
+    elif kind == "bonus":
         for row in sheet.rows:
             data.append({
                 "序号": row.serial,
@@ -678,7 +708,10 @@ def _build_preview_data(kind, sheet):
 
 def _render_sheet_totals(kind, sheet):
     """Render total lines for a parsed sheet."""
-    if kind == "bonus":
+    if kind == "meal2":
+        st.markdown(f"**{sheet.amount1_column}合计：** {sheet.amount1_total or '—'}")
+        st.markdown(f"**{sheet.amount2_column}合计：** {sheet.amount2_total or '—'}")
+    elif kind == "bonus":
         st.markdown(f"**奖金合计：** {sheet.bonus_total}")
         st.markdown(f"**个人所得税合计：** {sheet.tax_total}")
         st.markdown(f"**个人其他调整合计：** {sheet.adjustment_total}")
@@ -777,6 +810,8 @@ def render_step4_actions():
                     return
                 if kind == "bonus":
                     build_widgets = build_bonus_form_widgets
+                elif kind == "meal2":
+                    build_widgets = build_meal2_form_widgets
                 elif kind == "insurance":
                     build_widgets = get_insurance_entity(
                         st.session_state.approval_entity
@@ -860,6 +895,8 @@ def render_step4_actions():
         return
     if kind == "bonus":
         build_widgets = build_bonus_form_widgets
+    elif kind == "meal2":
+        build_widgets = build_meal2_form_widgets
     elif kind == "insurance":
         build_widgets = get_insurance_entity(st.session_state.approval_entity)[
             "form_builder"
@@ -1004,6 +1041,9 @@ def main():
     elif kind == "insurance":
         st.title(f"五险一金审批提交工具（{entity_label}）")
         st.markdown("上传五险一金分单位明细表，自动解析并提交飞书审批流程。")
+    elif kind == "meal2":
+        st.title("派遣员工简易费用明细表审批提交工具（两列金额）")
+        st.markdown("适用于每行带两个金额列的明细表（如单位工会经费、工会会费）。表头需含序号、姓名、身份证号及右侧两个金额列，末行为合计行；审批表单的「列名称映射」按上传表的列名自动填写。")
     else:
         st.title("派遣员工简易费用明细表审批提交工具")
         st.markdown("适用于手工制作的退返餐费、工会会费等简易费用表。表中除序号、姓名、身份证号外，仅设一列金额，表格末尾为合计金额。审批顺序：夏璠→张宇佳→蒿敬恪。")
