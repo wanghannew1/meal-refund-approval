@@ -6,6 +6,7 @@ Independent of the in-use single-amount flow: new parser
 """
 
 import json
+import re
 from decimal import Decimal
 from pathlib import Path
 
@@ -302,3 +303,48 @@ class TestRelaxedSheets:
             MEAL2_ROW_AMOUNT1,
         ]
         assert len(widgets[1]["value"]) == 1  # 映射仍只有金额1
+
+
+class TestMeal2Template:
+    """Shipped sanitized template templates/两列金额明细表模板.xlsx 的守护用例。"""
+
+    TPL = Path(__file__).resolve().parent.parent / "templates" / "两列金额明细表模板.xlsx"
+    FAKE_NAMES = {"张三", "李四", "王五", "赵六", "孙七", "周八", "吴九", "郑十"}
+    FAKE_ID = re.compile(r"^11010119\d{9}[\dX]$")
+
+    def test_exists(self):
+        assert self.TPL.exists(), f"Missing: {self.TPL}"
+
+    def test_parses_cleanly(self):
+        sheet = parse_meal_two_amount_excel(self.TPL)
+        assert sheet.title == "XX单位2026年XX月单位经费、工会会费明细（XX.XX）"
+        assert len(sheet.rows) == 6
+        assert sheet.amount1_column == "单位工会经费"
+        assert sheet.amount2_column == "工会会费"
+        assert sheet.rows[0].name == "李四"
+        assert sheet.rows[0].amount1 == "61.8"
+        assert sheet.amount1_total == "346.44"
+        assert sheet.amount2_total == "61"
+        assert sheet.maker == "张三"
+        assert sheet.warnings == []
+
+    def test_sanitized_names_and_ids(self):
+        sheet = parse_meal_two_amount_excel(self.TPL)
+        for row in sheet.rows:
+            assert row.name in self.FAKE_NAMES, f"Real name leaked: {row.name}"
+            assert self.FAKE_ID.match(row.id_card), f"Real ID leaked: {row.id_card}"
+        assert sheet.maker == "张三"
+
+    def test_builder_accepts_template(self):
+        sheet = parse_meal_two_amount_excel(self.TPL)
+        widgets = build_meal2_form_widgets(sheet, file_code="fake_code")
+        mapping = widgets[1]["value"]
+        assert [[c["value"] for c in r] for r in mapping] == [
+            ["金额1", "单位工会经费"],
+            ["金额2", "工会会费"],
+        ]
+        detail_rows = widgets[2]["value"]
+        assert len(detail_rows) == 6
+        for row in detail_rows:
+            assert len(row) == 4  # 姓名/身份证号码/金额1/金额2
+        json.dumps(widgets, ensure_ascii=False)
