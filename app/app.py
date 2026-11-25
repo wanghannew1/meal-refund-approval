@@ -472,9 +472,11 @@ def render_step1_upload():
     with st.expander("模板下载", expanded=False):
         st.markdown("**模板下载（可直接填写后上传）：**")
         templates_dir = _PROJECT_ROOT / "templates"
-        template_paths = sorted(templates_dir.glob("*.xlsx")) + sorted(
-            (templates_dir / "insurance").glob("*.xlsx")
-        )
+        # 五险一金分单位模板随 INSURANCE_KIND_ENABLED 一起上下架：
+        # 流程隐藏时模板文件保留在仓库，仅不在界面展示。
+        template_paths = sorted(templates_dir.glob("*.xlsx"))
+        if INSURANCE_KIND_ENABLED:
+            template_paths += sorted((templates_dir / "insurance").glob("*.xlsx"))
         if template_paths:
             for chunk_start in range(0, len(template_paths), 4):
                 chunk = template_paths[chunk_start : chunk_start + 4]
@@ -493,7 +495,8 @@ def render_step1_upload():
 
         st.caption("模板已脱敏（不含真实个人信息）；请保留表头与合计行结构后填写。")
         st.caption("返餐费末行写『总计』，工会会费末行写『合计』；工会会费多出的合计列可忽略。")
-        st.caption("五险一金请使用对应的分单位模板（医保/社保/工伤/公积金），每月一个 sheet 或一个文件均可。")
+        if INSURANCE_KIND_ENABLED:
+            st.caption("五险一金请使用对应的分单位模板（医保/社保/工伤/公积金），每月一个 sheet 或一个文件均可。")
         st.caption("两列金额：表头需含 姓名 和至少一个金额列；序号、身份证号、第二金额列可省略，单金额列表也可上传。末行合计行可选，有则自动校验。")
 
     kind = st.session_state.approval_kind
