@@ -84,7 +84,8 @@ if "submitted" not in st.session_state:
 if "tmp_file_path" not in st.session_state:
     st.session_state.tmp_file_path = None
 if "approval_kind" not in st.session_state:
-    st.session_state.approval_kind = "meal"
+    # 默认两列金额（审批类型选择器首项），与 visible_kind_options 首项一致。
+    st.session_state.approval_kind = "meal2"
 if "approval_entity" not in st.session_state:
     # 初值写 DEFAULT_INSURANCE_ENTITY 对应的字面量（此处位于常量定义之前）。
     # 若该主体被隐藏（彩虹公司暂时停用），main() 会归位到第一个可见主体。
@@ -167,11 +168,11 @@ INSURANCE_KIND_ENABLED = False
 def visible_kind_options() -> list[tuple[str, str]]:
     """(label, kind) pairs exposed in the 审批类型 selector, in display order."""
     options = [
+        # 两列金额：2026-11 新增审批流程，独立解析器与表单构建，
+        # 不影响在用的单金额派遣员工流程。放首位作为默认选中项。
+        ("派遣员工简易费用明细表审批-两列金额", "meal2"),
         ("派遣员工简易费用明细表审批", "meal"),
         ("奖金发放审批", "bonus"),
-        # 两列金额：2026-11 新增审批流程，独立解析器与表单构建，
-        # 不影响在用的单金额派遣员工流程。
-        ("派遣员工简易费用明细表审批-两列金额", "meal2"),
     ]
     if INSURANCE_KIND_ENABLED:
         options.append(("五险一金审批", "insurance"))
