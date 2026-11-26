@@ -8,7 +8,9 @@ Tests for the 3 seal/stamp batch-approval flows (用章/用印批量申请).
   build_seal_contract_batch_form_widgets
 
 Widget IDs and radio option values were verified against the live
-approval definitions on 2026-11-25.
+approval definitions on 2026-11-25; the row-radio widget display name
+(用印主体) and per-flow option text suffixes (合同章/公章) were
+re-verified after the online rename on 2026-11-26.
 """
 
 import datetime as dt
@@ -62,7 +64,6 @@ from app.form_builder import (
     SEAL_ROW_NAME,
     SEAL_ROW_OPTION,
     SEAL_ROW_REASON,
-    SEAL_TYPE_OPTIONS,
     build_seal_contract_batch_form_widgets,
     build_seal_reseal_form_widgets,
     build_seal_terminate_cert_form_widgets,
@@ -85,7 +86,7 @@ def _make_reseal_xlsx(
     *,
     start: str = "2026-01-01",
     end: str = "2026-12-31",
-    seal: str = "彩虹公司公章",
+    seal: str = "彩虹公司合同章",
     reason_cell: str = "合同到期未及时续签，现补签",
     copies=1,
     omit: str | None = None,
@@ -94,7 +95,7 @@ def _make_reseal_xlsx(
 ) -> None:
     wb = openpyxl.Workbook()
     ws = wb.active
-    headers = ["序号", "派遣员工姓名", "合同开始时间", "合同结束时间", "印章类型", "补签原因", "合同份数"]
+    headers = ["序号", "派遣员工姓名", "合同开始时间", "合同结束时间", "用印主体", "补签原因", "合同份数"]
     if omit:
         headers.remove(omit)
     ws.append(headers)
@@ -102,7 +103,7 @@ def _make_reseal_xlsx(
     for serial, name in people:
         row = [int(serial), name, start, end, seal, reason_cell, copies]
         if omit:
-            idx = ["序号", "派遣员工姓名", "合同开始时间", "合同结束时间", "印章类型", "补签原因", "合同份数"].index(omit)
+            idx = ["序号", "派遣员工姓名", "合同开始时间", "合同结束时间", "用印主体", "补签原因", "合同份数"].index(omit)
             row.pop(idx)
         ws.append(row)
     if total_copies is not None:
@@ -116,16 +117,16 @@ def _make_reseal_xlsx(
 def _make_term_xlsx(path: Path, *, seal: str = "吉林分公司公章", copies=2) -> None:
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.append(["序号", "派遣员工姓名", "证明份数", "印章类型"])
+    ws.append(["序号", "派遣员工姓名", "证明份数", "用印主体"])
     for serial, name in [("1", "李四"), ("2", "王五")]:
         ws.append([int(serial), name, copies, seal])
     wb.save(path)
 
 
-def _make_batch_xlsx(path: Path, *, entity: str = "彩虹公司", id_copies="1") -> None:
+def _make_batch_xlsx(path: Path, *, entity: str = "彩虹公司合同章", id_copies="1") -> None:
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.append(["序号", "派遣员工姓名", "签约主体", "合同份数", "身份证复印件盖公章份数"])
+    ws.append(["序号", "派遣员工姓名", "用印主体", "合同份数", "身份证复印件盖公章份数"])
     for serial, name in [("1", "李四"), ("2", "王五"), ("3", "赵六")]:
         ws.append([int(serial), name, entity, 2, id_copies])
     wb.save(path)
@@ -162,8 +163,8 @@ class TestParseSealReseal:
         assert first.serial == "1"
         assert first.name == "李四"
         assert first.copies == 1
-        assert first.option_text == "彩虹公司公章"
-        assert first.option_value == SEAL_TYPE_OPTIONS["彩虹公司公章"]
+        assert first.option_text == "彩虹公司合同章"
+        assert first.option_value == SEAL_ENTITY_OPTION_VALUES["彩虹公司"]
         assert first.start_date == "2026-01-01T00:00:00+08:00"
         assert first.end_date == "2026-12-31T00:00:00+08:00"
         assert first.interval_days == "364"
@@ -175,7 +176,7 @@ class TestParseSealReseal:
         assert sheet.reason == "补签派遣员工合同用章，共3人，合同份数合计3份"
         assert sheet.remark == ""
         assert sheet.copies_label == "合同份数"
-        assert sheet.option_label == "印章类型"
+        assert sheet.option_label == "用印主体"
         assert sheet.total_copies == 3
         assert sheet.warnings == []
 
@@ -202,7 +203,7 @@ class TestParseSealReseal:
         path = tmp_path / "nosuffix.xlsx"
         _make_reseal_xlsx(path, seal="白城分公司")
         sheet = parse_seal_reseal_excel(path)
-        assert sheet.rows[0].option_value == SEAL_TYPE_OPTIONS["白城分公司公章"]
+        assert sheet.rows[0].option_value == SEAL_ENTITY_OPTION_VALUES["白城分公司"]
 
     def test_end_before_start_rejected(self, tmp_path: Path):
         path = tmp_path / "reversed.xlsx"
@@ -226,7 +227,7 @@ class TestParseSealReseal:
     def test_unknown_seal_rejected(self, tmp_path: Path):
         path = tmp_path / "unknown.xlsx"
         _make_reseal_xlsx(path, seal="海淀分公司公章")
-        with pytest.raises(ValueError, match="印章类型无法识别"):
+        with pytest.raises(ValueError, match="用印主体无法识别"):
             parse_seal_reseal_excel(path)
 
     def test_empty_reason_column_rejected(self, tmp_path: Path):
@@ -277,7 +278,7 @@ class TestParseSealTerminateCert:
         row = sheet.rows[0]
         assert row.name == "李四"
         assert row.copies == 2
-        assert row.option_value == SEAL_TYPE_OPTIONS["吉林分公司公章"]
+        assert row.option_value == SEAL_ENTITY_OPTION_VALUES["吉林分公司"]
         assert row.start_date == "" and row.end_date == ""
         assert row.reason == "" and row.id_copy_copies == ""
         assert sheet.copies_label == "证明份数"
@@ -293,10 +294,10 @@ class TestParseSealContractBatch:
         row = sheet.rows[1]
         assert row.name == "王五"
         assert row.copies == 2
-        assert row.option_text == "彩虹公司"
+        assert row.option_text == "彩虹公司合同章"
         assert row.option_value == SEAL_ENTITY_OPTION_VALUES["彩虹公司"]
         assert row.id_copy_copies == "1"
-        assert sheet.option_label == "签约主体"
+        assert sheet.option_label == "用印主体"
         assert sheet.copies_label == "合同份数"
         assert sheet.total_copies == 6
         assert sheet.warnings == []
@@ -323,31 +324,43 @@ class TestParseSealContractBatch:
     def test_unknown_entity_rejected(self, tmp_path: Path):
         path = tmp_path / "unknown.xlsx"
         _make_batch_xlsx(path, entity="海淀分公司")
-        with pytest.raises(ValueError, match="签约主体无法识别"):
+        with pytest.raises(ValueError, match="用印主体无法识别"):
             parse_seal_contract_batch_excel(path)
 
 
 # ── Option value resolution ──────────────────────────────────────────
 
 class TestResolveSealOptionValue:
-    def test_all_seal_types(self):
-        for text, value in SEAL_TYPE_OPTIONS.items():
-            assert resolve_seal_option_value(text, "印章类型") == value
+    def test_all_flow_suffixes(self):
+        """各流程选项文本（主体名+本流程后缀）均可解析。"""
+        for suffix in ("合同章", "公章"):
+            for entity, value in SEAL_ENTITY_OPTION_VALUES.items():
+                assert resolve_seal_option_value(f"{entity}{suffix}", suffix) == value
 
-    def test_all_entities(self):
-        for text, value in SEAL_ENTITY_OPTION_VALUES.items():
-            assert resolve_seal_option_value(text, "签约主体") == value
+    def test_bare_entity_and_cross_suffix_tolerant(self):
+        """省略后缀、后缀写错（跨流程）均按主体名解析。"""
+        value = SEAL_ENTITY_OPTION_VALUES["彩虹公司"]
+        assert resolve_seal_option_value("彩虹公司", "合同章") == value
+        assert resolve_seal_option_value("彩虹公司公章", "合同章") == value
+        assert resolve_seal_option_value("彩虹公司合同章", "公章") == value
 
     def test_whitespace_tolerant(self):
-        assert resolve_seal_option_value(" 彩虹公司公章 ", "印章类型") == SEAL_TYPE_OPTIONS["彩虹公司公章"]
+        assert (
+            resolve_seal_option_value(" 彩虹公司公章 ", "公章")
+            == SEAL_ENTITY_OPTION_VALUES["彩虹公司"]
+        )
 
     def test_error_lists_allowed(self):
         with pytest.raises(ValueError, match="公主岭分公司公章"):
-            resolve_seal_option_value("不存在公章", "印章类型")
+            resolve_seal_option_value("不存在公章", "公章")
 
     def test_label_helper(self):
-        assert seal_option_labels("印章类型") == list(SEAL_TYPE_OPTIONS)
-        assert seal_option_labels("签约主体") == list(SEAL_ENTITY_OPTION_VALUES)
+        assert seal_option_labels("公章") == [
+            f"{entity}公章" for entity in SEAL_ENTITY_OPTION_VALUES
+        ]
+        assert seal_option_labels("合同章") == [
+            f"{entity}合同章" for entity in SEAL_ENTITY_OPTION_VALUES
+        ]
 
 
 # ── Form builders ────────────────────────────────────────────────────
@@ -381,7 +394,7 @@ class TestBuildSealReseal:
         assert row[2]["type"] == "number"
         assert row[2]["value"] == 1
         assert row[3]["type"] == "radioV2"
-        assert row[3]["value"] == SEAL_TYPE_OPTIONS["彩虹公司公章"]
+        assert row[3]["value"] == SEAL_ENTITY_OPTION_VALUES["彩虹公司"]
         assert row[4]["value"] == "合同到期未及时续签，现补签"
         json.dumps(widgets, ensure_ascii=False)
 
@@ -406,7 +419,7 @@ class TestBuildSealTerminateCert:
             SEAL_ROW_NAME, SEAL_ROW_COPIES, SEAL_ROW_OPTION,
         ]
         assert row[1]["value"] == 2
-        assert row[2]["value"] == SEAL_TYPE_OPTIONS["吉林分公司公章"]
+        assert row[2]["value"] == SEAL_ENTITY_OPTION_VALUES["吉林分公司"]
         assert SEAL_ROW_DATE_INTERVAL not in [c["id"] for c in row]
         json.dumps(widgets, ensure_ascii=False)
 

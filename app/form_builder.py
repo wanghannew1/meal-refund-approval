@@ -616,12 +616,16 @@ def build_meal2_form_widgets(
 # 三表由同一模板复制而来，控件 ID 高度重合（明细列表/姓名/份数/单选/
 # 事由/备注/附件完全同 ID）；差异控件：
 #   - 补签：行内另有 合同起止 dateInterval + 补签原因 textarea；
-#   - 新签/续签：行内另有 身份证复印件盖公章份数 input，单选列为签约主体。
+#   - 新签/续签：行内另有 身份证复印件盖公章份数 input。
 # 表单没有标题控件，实例名固定为审批定义名；顶层为
 # 用章事由（widget0，必填）→ 明细列表 → 备注 → 附件。
 # 2026-11-26 线上核实：用章事由控件显示名为 新签/续签「用章事由-仅
 # 新签/续签可用」、补签「用章事由-仅补签可用」、解除「用章事由」；
 # 提交按控件 ID 填值，不依赖显示名。
+# 2026-11-26 线上核实（改名）：行级单选控件显示名统一为「用印主体」
+# （原 补签/解除「印章类型」、新签/续签「签约主体」），控件 ID 未变；
+# 选项文本 = 主体名+后缀：补签/新签续签「合同章」、解除「公章」，
+# 选项 value 未变；解除流程另设默认值 彩虹公司公章（提交仍显式传值）。
 # radioV2 的 value 必须传选项 value（非选项文本），映射见
 # SEAL_ENTITY_OPTION_VALUES；dateInterval 的 value 为
 # {start, end(RFC3339), interval(天)} 对象。
@@ -633,15 +637,20 @@ SEAL_REASON = "widget0"                            # 用章事由 textarea（必
 SEAL_DETAIL_LIST = "widget17954194453400001"       # 明细 fieldList（3 表共用）
 SEAL_ROW_NAME = "widget17954194530910001"          # 派遣员工姓名 input
 SEAL_ROW_COPIES = "widget17954194884670001"        # 合同份数/证明份数 number
-SEAL_ROW_OPTION = "widget17953432091600001"        # 印章类型/签约主体 radioV2
+SEAL_ROW_OPTION = "widget17953432091600001"        # 用印主体 radioV2
 SEAL_ROW_DATE_INTERVAL = "widget17955967811230001"  # 补签：合同起止 dateInterval
 SEAL_ROW_REASON = "widget17955969605740001"        # 补签：补签原因 textarea
 SEAL_ROW_ID_COPIES = "widget17954195767570001"     # 新签：身份证复印件盖公章份数 input
 SEAL_REMARK = "widget17953417689960001"            # 备注 textarea（选填）
 SEAL_ATTACHMENT = "widget15828104903330001"        # 附件 attachmentV2（选填）
 
+# 行级单选控件显示名（3 表一致；2026-11-26 线上核实由 补签/解除的
+# 「印章类型」与新签/续签的「签约主体」统一改名为「用印主体」）。
+SEAL_OPTION_LABEL = "用印主体"
+
 # 主体 → radioV2 选项 value（3 表的单选选项取值完全一致）。
-# 印章类型列的选项文本 = 主体名 + 「公章」；签约主体列 = 主体名。
+# 选项文本 = 主体名 + 后缀（见 SEAL_KIND_OPTION_SUFFIXES）；value 只与
+# 主体对应，与后缀无关（2026-11-26 线上核实）。
 SEAL_ENTITY_OPTION_VALUES: dict[str, str] = {
     "彩虹公司": "mwrozq2w-dl9xxzxtd6-0",
     "长白山分公司": "mwrozq2w-5utstr4jpbi-0",
@@ -650,38 +659,40 @@ SEAL_ENTITY_OPTION_VALUES: dict[str, str] = {
     "公主岭分公司": "mwrozq41-l2wrznbz6m-3",
 }
 
-# 印章类型列（补签 / 解除证明流程）：选项文本带「公章」后缀。
-SEAL_TYPE_OPTIONS: dict[str, str] = {
-    f"{entity}公章": value for entity, value in SEAL_ENTITY_OPTION_VALUES.items()
+# 各流程用印主体选项文本的后缀（kind → 后缀）。
+SEAL_KIND_OPTION_SUFFIXES: dict[str, str] = {
+    "seal_reseal": "合同章",
+    "seal_terminate_cert": "公章",
+    "seal_contract_batch": "合同章",
 }
 
-# 签约主体列（新签/续签流程）：选项文本即主体名。
-SIGN_ENTITY_OPTIONS: dict[str, str] = dict(SEAL_ENTITY_OPTION_VALUES)
+
+def seal_option_labels(suffix: str) -> list[str]:
+    """按后缀返回用印主体的合法选项文本列表（错误提示用）。"""
+    return [f"{entity}{suffix}" for entity in SEAL_ENTITY_OPTION_VALUES]
 
 
-def seal_option_labels(option_label: str) -> list[str]:
-    """返回指定单选列的合法选项文本列表（错误提示用）。"""
-    table = SEAL_TYPE_OPTIONS if option_label == "印章类型" else SIGN_ENTITY_OPTIONS
-    return list(table)
+def resolve_seal_option_value(text: str, suffix: str = "公章") -> str:
+    """把 Excel 中用印主体文本解析为 radioV2 选项 value。
 
-
-def resolve_seal_option_value(text: str, option_label: str) -> str:
-    """把 Excel 中印章类型/签约主体文本解析为 radioV2 选项 value。
-
-    兼容忽略空白、印章类型省略「公章」后缀（如「彩虹公司」）等写法。
-    无法识别时抛 ValueError 并列出全部合法选项。
+    三个流程的选项仅后缀不同（公章/合同章），value 与主体一一对应，
+    故解析只看主体名，后缀写法兼容（可省略如「彩虹公司」，写错后缀
+    如解除流程里写「合同章」也可）。无法识别时抛 ValueError 并列出
+    该流程的全部合法选项文本。
     """
-    table = SEAL_TYPE_OPTIONS if option_label == "印章类型" else SIGN_ENTITY_OPTIONS
     cleaned = _re.sub(r"\s+", "", str(text))
-    if cleaned in table:
-        return table[cleaned]
-    if cleaned + "公章" in table:
-        return table[cleaned + "公章"]
-    for label, value in table.items():
-        if cleaned.startswith(label) or label.startswith(cleaned):
+    core = cleaned
+    for known in ("合同章", "公章"):
+        if core.endswith(known):
+            core = core[: -len(known)]
+            break
+    if core in SEAL_ENTITY_OPTION_VALUES:
+        return SEAL_ENTITY_OPTION_VALUES[core]
+    for entity, value in SEAL_ENTITY_OPTION_VALUES.items():
+        if core and (cleaned.startswith(entity) or entity.startswith(core)):
             return value
-    allowed = "、".join(table)
-    raise ValueError(f"{option_label}无法识别：{text}（可选：{allowed}）")
+    allowed = "、".join(seal_option_labels(suffix))
+    raise ValueError(f"{SEAL_OPTION_LABEL}无法识别：{text}（可选：{allowed}）")
 
 
 def build_seal_reseal_form_widgets(
@@ -694,7 +705,7 @@ def build_seal_reseal_form_widgets(
 
     Detail rows carry exactly 5 children in definition order:
     派遣员工姓名 (input) → 合同起止 (dateInterval) → 合同份数 (number)
-    → 印章类型 (radioV2) → 补签原因 (textarea).  Top level:
+    → 用印主体 (radioV2) → 补签原因 (textarea).  Top level:
     用章事由 (textarea, 必填) → 明细 → 备注 → 附件.
 
     Args:
@@ -752,7 +763,7 @@ def build_seal_terminate_cert_form_widgets(
     """Build widgets for 解除（终止）劳动合同证明书用印申请.
 
     Detail rows carry exactly 3 children in definition order:
-    派遣员工姓名 (input) → 证明份数 (number) → 印章类型 (radioV2).
+    派遣员工姓名 (input) → 证明份数 (number) → 用印主体 (radioV2).
 
     Args:
         sheet: Parsed terminate-certificate sheet.
@@ -799,7 +810,7 @@ def build_seal_contract_batch_form_widgets(
     """Build widgets for 新签/续签派遣员工合同批量用章用印申请.
 
     Detail rows carry exactly 4 children in definition order:
-    派遣员工姓名 (input) → 合同份数 (number) → 签约主体 (radioV2)
+    派遣员工姓名 (input) → 合同份数 (number) → 用印主体 (radioV2)
     → 身份证复印件盖公章份数 (input; the form defines it as a text
     input, so the raw Excel text is passed through).
 

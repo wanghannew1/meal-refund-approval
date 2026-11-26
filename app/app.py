@@ -50,6 +50,7 @@ from app.form_builder import (
     build_seal_terminate_cert_form_widgets,
     build_seal_contract_batch_form_widgets,
     seal_option_labels,
+    SEAL_KIND_OPTION_SUFFIXES,
 )
 from app.feishu_api import (
     get_tenant_token,
@@ -191,7 +192,6 @@ SEAL_KINDS: dict[str, dict] = {
         "parser": parse_seal_contract_batch_excel,
         "form_builder": build_seal_contract_batch_form_widgets,
         "upload_label": "选择新签/续签派遣员工合同批量用章明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）",
-        "option_label": "签约主体",
     },
     "seal_terminate_cert": {
         "label": "解除（终止）劳动合同证明书用印申请",
@@ -199,7 +199,6 @@ SEAL_KINDS: dict[str, dict] = {
         "parser": parse_seal_terminate_cert_excel,
         "form_builder": build_seal_terminate_cert_form_widgets,
         "upload_label": "选择解除（终止）劳动合同证明书用印明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）",
-        "option_label": "印章类型",
     },
     "seal_reseal": {
         "label": "补签派遣员工合同用章申请",
@@ -207,7 +206,6 @@ SEAL_KINDS: dict[str, dict] = {
         "parser": parse_seal_reseal_excel,
         "form_builder": build_seal_reseal_form_widgets,
         "upload_label": "选择补签派遣员工合同用章明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）",
-        "option_label": "印章类型",
     },
 }
 
@@ -593,10 +591,10 @@ def render_step1_upload():
         if INSURANCE_KIND_ENABLED:
             st.caption("五险一金请使用对应的分单位模板（医保/社保/工伤/公积金），每月一个 sheet 或一个文件均可。")
         if st.session_state.approval_kind in SEAL_KINDS:
-            meta = SEAL_KINDS[st.session_state.approval_kind]
+            kind_id = st.session_state.approval_kind
             st.caption(
                 f"用章/用印模板首行即列头，只需填明细列表；"
-                f"{meta['option_label']}需填写：{'、'.join(seal_option_labels(meta['option_label']))}；"
+                f"用印主体需填写：{'、'.join(seal_option_labels(SEAL_KIND_OPTION_SUFFIXES[kind_id]))}；"
                 "合同/证明份数默认 4 份，可按需修改。"
             )
             st.caption("用章事由提交时按明细自动生成（人数、份数），步骤 2 中可修改；备注在步骤 3 填写。")
@@ -1229,21 +1227,21 @@ def main():
         st.title("补签派遣员工合同用章申请提交工具（批量）")
         st.markdown(
             "上传补签派遣员工合同用章明细表，每个文件生成一个独立审批单，"
-            "表内每行一位员工（含合同起止时间、印章类型、补签原因、合同份数）。"
+            "表内每行一位员工（含合同起止时间、用印主体、补签原因、合同份数）。"
             "该流程仅限补签派遣员工合同使用，其他文件勿用。"
         )
     elif kind == "seal_terminate_cert":
         st.title("解除（终止）劳动合同证明书用印申请提交工具（批量）")
         st.markdown(
             "上传解除（终止）劳动合同证明书用印明细表，每个文件生成一个独立审批单，"
-            "表内每行一位员工（含证明份数、印章类型）。"
+            "表内每行一位员工（含证明份数、用印主体）。"
             "该流程仅限解除（终止）劳动合同证明书使用，其他文件勿用。"
         )
     elif kind == "seal_contract_batch":
         st.title("新签/续签派遣员工合同批量用章用印申请提交工具（批量）")
         st.markdown(
             "上传新签/续签派遣员工合同批量用章明细表，每个文件生成一个独立审批单，"
-            "表内每行一位员工（含签约主体、合同份数、身份证复印件盖公章份数）。"
+            "表内每行一位员工（含用印主体、合同份数、身份证复印件盖公章份数）。"
             "该流程仅限新签/续签派遣员工合同使用，其他文件勿用。"
         )
     elif kind == "bonus":

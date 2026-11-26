@@ -1491,7 +1491,7 @@ class SealDetailRow:
         serial: 序号（预览展示用，审批表单无序号控件）。
         name: 派遣员工姓名。
         copies: 合同份数 / 证明份数（number 控件，正整数）。
-        option_text: Excel 中印章类型/签约主体的原始文本（预览展示用）。
+        option_text: Excel 中用印主体的原始文本（预览展示用）。
         option_value: 对应审批表单单选控件的选项 value。
         start_date: 合同开始时间（RFC3339，仅补签流程非空）。
         end_date: 合同结束时间（RFC3339，仅补签流程非空）。
@@ -1522,7 +1522,7 @@ class SealDetailSheet:
         remark: 备注恒为空串（备注在界面填写）。
         rows: 明细数据行。
         copies_label: 份数列名（合同份数 / 证明份数），预览与合计展示用。
-        option_label: 单选列名（印章类型 / 签约主体），预览表头用。
+        option_label: 单选列名（用印主体），预览表头用。
         total_copies: 明细份数合计。
         maker: 保留字段，恒为空串（用章流程不采集制表人）。
         warnings: 警告信息列表。
@@ -1547,7 +1547,7 @@ def _resolve_seal_header(cell_value: object) -> str | None:
         name:      姓名 / 派遣员工姓名 / 员工姓名
         id_copies: 同时含「身份证」和「份数」（身份证复印件盖公章份数）
         copies:    含「份数」（合同份数 / 证明份数）
-        option:    含「印章」或「主体」（印章类型 / 签约主体）
+        option:    含「印章」或「主体」（用印主体；旧表头 印章类型/签约主体 兼容）
         start:     含「开始」（合同开始时间）
         end:       含「结束」（合同结束时间）
         reason:    含「原因」（补签原因）
@@ -1645,7 +1645,7 @@ class _SealParseSpec:
     """单个用章/用印流程的解析规格。"""
 
     copies_label: str      # 合同份数 / 证明份数
-    option_label: str      # 印章类型 / 签约主体
+    option_label: str      # 用印主体
     required: frozenset    # 表头必须出现的规范字段
     has_dates: bool        # 是否解析合同起止时间（补签流程）
     has_reason: bool       # 是否解析补签原因列（补签流程）
@@ -1655,7 +1655,7 @@ class _SealParseSpec:
 _SEAL_SPECS: dict[str, _SealParseSpec] = {
     "seal_reseal": _SealParseSpec(
         copies_label="合同份数",
-        option_label="印章类型",
+        option_label="用印主体",
         required=frozenset({"name", "start", "end", "copies", "option", "reason"}),
         has_dates=True,
         has_reason=True,
@@ -1663,7 +1663,7 @@ _SEAL_SPECS: dict[str, _SealParseSpec] = {
     ),
     "seal_terminate_cert": _SealParseSpec(
         copies_label="证明份数",
-        option_label="印章类型",
+        option_label="用印主体",
         required=frozenset({"name", "copies", "option"}),
         has_dates=False,
         has_reason=False,
@@ -1671,7 +1671,7 @@ _SEAL_SPECS: dict[str, _SealParseSpec] = {
     ),
     "seal_contract_batch": _SealParseSpec(
         copies_label="合同份数",
-        option_label="签约主体",
+        option_label="用印主体",
         required=frozenset({"name", "copies", "option", "id_copies"}),
         has_dates=False,
         has_reason=False,
@@ -1696,11 +1696,14 @@ def _parse_seal_form_excel(
 
     Excel 只需一张明细列表，首行即列头；表头按列名识别（列序随意、
     序号列可选），故表前有说明行也不影响。用章事由按解析结果自动
-    生成（界面可修改），备注由界面填写；印章类型/签约主体文本实时
+    生成（界面可修改），备注由界面填写；用印主体文本实时
     校验为表单选项 value；补签流程自动按合同起止时间计算期限天数。
     """
     # form_builder 依赖本模块，函数内延迟导入避免循环依赖。
-    from app.form_builder import resolve_seal_option_value
+    from app.form_builder import (
+        SEAL_KIND_OPTION_SUFFIXES,
+        resolve_seal_option_value,
+    )
 
     spec = _SEAL_SPECS[kind]
 
@@ -1798,7 +1801,9 @@ def _parse_seal_form_excel(
             )
             if not option_text:
                 raise ValueError(f"第{row_no}行{spec.option_label}为空")
-            option_value = resolve_seal_option_value(option_text, spec.option_label)
+            option_value = resolve_seal_option_value(
+                option_text, SEAL_KIND_OPTION_SUFFIXES[kind]
+            )
 
             start_date = end_date = interval_days = ""
             if spec.has_dates:
@@ -1915,8 +1920,9 @@ def parse_seal_reseal_excel(
 ) -> SealDetailSheet:
     """解析补签派遣员工合同用章申请明细表。
 
-    必需列：派遣员工姓名、合同开始时间、合同结束时间、印章类型、
-    补签原因、合同份数；序号列可选。合同期限天数由起止时间自动计算。
+    必需列：派遣员工姓名、合同开始时间、合同结束时间、用印主体
+    （旧表头「印章类型」兼容）、补签原因、合同份数；序号列可选。
+    合同期限天数由起止时间自动计算。
     """
     return _parse_seal_form_excel(path, "seal_reseal", sheet_name, sheet_index)
 
@@ -1928,7 +1934,8 @@ def parse_seal_terminate_cert_excel(
 ) -> SealDetailSheet:
     """解析解除（终止）劳动合同证明书用印申请明细表。
 
-    必需列：派遣员工姓名、证明份数、印章类型；序号列可选。
+    必需列：派遣员工姓名、证明份数、用印主体（旧表头「印章类型」兼容）；
+    序号列可选。
     """
     return _parse_seal_form_excel(path, "seal_terminate_cert", sheet_name, sheet_index)
 
@@ -1940,8 +1947,8 @@ def parse_seal_contract_batch_excel(
 ) -> SealDetailSheet:
     """解析新签/续签派遣员工合同批量用章用印申请明细表。
 
-    必需列：派遣员工姓名、签约主体、合同份数、身份证复印件盖公章份数；
-    序号列可选。
+    必需列：派遣员工姓名、用印主体（旧表头「签约主体」兼容）、合同份数、
+    身份证复印件盖公章份数；序号列可选。
     """
     return _parse_seal_form_excel(path, "seal_contract_batch", sheet_name, sheet_index)
 
