@@ -619,6 +619,9 @@ def build_meal2_form_widgets(
 #   - 新签/续签：行内另有 身份证复印件盖公章份数 input，单选列为签约主体。
 # 表单没有标题控件，实例名固定为审批定义名；顶层为
 # 用章事由（widget0，必填）→ 明细列表 → 备注 → 附件。
+# 2026-11-26 线上核实：用章事由控件显示名为 新签/续签「用章事由-仅
+# 新签/续签可用」、补签「用章事由-仅补签可用」、解除「用章事由」；
+# 提交按控件 ID 填值，不依赖显示名。
 # radioV2 的 value 必须传选项 value（非选项文本），映射见
 # SEAL_ENTITY_OPTION_VALUES；dateInterval 的 value 为
 # {start, end(RFC3339), interval(天)} 对象。
