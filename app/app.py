@@ -547,6 +547,20 @@ def render_sidebar():
 # ---------------------------------------------------------------------------
 # Step 1: Upload Excel
 # ---------------------------------------------------------------------------
+def _uniform_detected_kind(items: list[dict], current_kind: str) -> str | None:
+    """盲传识别后判断是否应自动切换「审批类型」选择器。
+
+    全部文件识别为同一个用章流程、且与当前所选类型不同时返回该流程
+    kind；有混传（识别结果不一致，或部分识别失败保持所选类型）或
+    识别结果与所选类型一致时返回 None（维持现状，按文件各自流程处理）。
+    """
+    kinds = {it.get("kind") for it in items if it.get("kind") in SEAL_KINDS}
+    if len(kinds) != 1:
+        return None
+    (detected,) = tuple(kinds)
+    return detected if detected != current_kind else None
+
+
 def render_step1_upload():
     """Render Step 1: Upload and parse Excel file(s).
 
@@ -618,6 +632,11 @@ def render_step1_upload():
         label = "选择返餐费或工会会费明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）"
 
     uploaded_files = st.file_uploader(label, type=["xls", "xlsx"], accept_multiple_files=True)
+
+    # 盲传自动切换的一次性提示（重跑后在选择器已就位时显示）。
+    switch_note = st.session_state.pop("kind_switch_note", None)
+    if switch_note:
+        st.info(switch_note)
 
     st.caption("每个 Excel 文件会被解析为独立的审批单，提交时逐个生成飞书审批实例。")
 
@@ -707,6 +726,16 @@ def render_step1_upload():
                         "sheet_name": None,
                     }
                 )
+
+        # 全部文件同属一个与所选类型不同的用章流程 → 「审批类型」
+        # 选择器跟随切换（st.rerun 后在选择器实例化前生效）。
+        switch_kind = _uniform_detected_kind(st.session_state.batch_items, kind)
+        if switch_kind:
+            st.session_state.pending_approval_kind = switch_kind
+            st.session_state.kind_switch_note = (
+                f"已按上传文件自动识别，审批类型切换为「{SEAL_KINDS[switch_kind]['label']}」"
+            )
+            st.rerun()
     return
 
 
@@ -1292,11 +1321,22 @@ def main():
     if not render_login_gate():
         return
 
+    # 盲传识别触发的审批类型自动切换：必须在选择器实例化前改写其
+    # key 状态，否则选择器仍显示旧类型，会把审批类型又改回去。
+    pending_kind = st.session_state.pop("pending_approval_kind", None)
+    if pending_kind in kind_keys and pending_kind != st.session_state.approval_kind:
+        st.session_state.approval_kind = pending_kind
+        st.session_state["approval_kind_selector"] = {
+            k: label for label, k in kind_options
+        }[pending_kind]
+
     # Approval type selector：仅展示可见类型（五险一金暂时整体下线，代码保留）。
+    # 绑定 key 以支持盲传识别后程序化切换选中项。
     kind_label = st.radio(
         "审批类型",
         [label for label, _ in kind_options],
         horizontal=True,
+        key="approval_kind_selector",
     )
     new_kind = dict(kind_options)[kind_label]
     if new_kind != st.session_state.approval_kind:

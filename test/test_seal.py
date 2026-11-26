@@ -378,6 +378,44 @@ class TestDetectSealKind:
         assert detect_seal_kind(path) is None
 
 
+# ── 审批类型选择器跟随盲传识别 ────────────────────────────────────────
+
+class TestUniformDetectedKind:
+    """全部文件识别为同一流程且与所选类型不同时，选择器跟随切换。"""
+
+    def _fn(self):
+        from app.app import _uniform_detected_kind
+
+        return _uniform_detected_kind
+
+    def test_uniform_mismatch_switches(self):
+        items = [{"kind": "seal_terminate_cert"}, {"kind": "seal_terminate_cert"}]
+        assert self._fn()(items, "seal_reseal") == "seal_terminate_cert"
+
+    def test_single_file_mismatch_switches(self):
+        assert self._fn()([{"kind": "seal_contract_batch"}], "seal_reseal") == (
+            "seal_contract_batch"
+        )
+
+    def test_same_as_selected_no_switch(self):
+        assert self._fn()([{"kind": "seal_reseal"}], "seal_reseal") is None
+
+    def test_mixed_kinds_no_switch(self):
+        items = [{"kind": "seal_reseal"}, {"kind": "seal_terminate_cert"}]
+        assert self._fn()(items, "seal_reseal") is None
+
+    def test_unrecognized_keeps_selected_kind_no_switch(self):
+        """识别失败的文件保持所选类型 → 视为混传，不切换。"""
+        items = [{"kind": "seal_reseal"}, {"kind": "seal_terminate_cert"}]
+        assert self._fn()(items, "seal_reseal") is None
+
+    def test_non_seal_items_no_switch(self):
+        assert self._fn()([{"kind": "bonus"}, {"kind": "meal2"}], "bonus") is None
+
+    def test_empty_items_no_switch(self):
+        assert self._fn()([], "seal_reseal") is None
+
+
 # ── Option value resolution ──────────────────────────────────────────
 
 class TestResolveSealOptionValue:
