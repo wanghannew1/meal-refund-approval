@@ -92,8 +92,8 @@ if "submitted" not in st.session_state:
 if "tmp_file_path" not in st.session_state:
     st.session_state.tmp_file_path = None
 if "approval_kind" not in st.session_state:
-    # 默认补签用章（审批类型选择器首项），与 visible_kind_options 首项一致。
-    st.session_state.approval_kind = "seal_reseal"
+    # 默认新签/续签用章（审批类型选择器首项），与 visible_kind_options 首项一致。
+    st.session_state.approval_kind = "seal_contract_batch"
 if "approval_entity" not in st.session_state:
     # 初值写 DEFAULT_INSURANCE_ENTITY 对应的字面量（此处位于常量定义之前）。
     # 若该主体被隐藏（彩虹公司暂时停用），main() 会归位到第一个可见主体。
@@ -182,14 +182,16 @@ BONUS_KIND_ENABLED = False
 # 用章/用印批量申请流程（2026-11-25 上线）。三个审批定义由同一模板
 # 复制而来，控件 ID 高度重合；Code 全部来自环境变量，代码不硬编码。
 # 各流程仅限对应类型文件使用（审批定义名称含「其他文件勿用」）。
+# 注册表顺序即「审批类型」选择器与模板下载的展示顺序：
+# 新签/续签 → 解除证明 → 补签。
 SEAL_KINDS: dict[str, dict] = {
-    "seal_reseal": {
-        "label": "补签派遣员工合同用章申请",
-        "env": "FEISHU_SEAL_RESEAL_APPROVAL_CODE",
-        "parser": parse_seal_reseal_excel,
-        "form_builder": build_seal_reseal_form_widgets,
-        "upload_label": "选择补签派遣员工合同用章明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）",
-        "option_label": "印章类型",
+    "seal_contract_batch": {
+        "label": "新签/续签派遣员工合同批量用章用印申请",
+        "env": "FEISHU_SEAL_CONTRACT_BATCH_APPROVAL_CODE",
+        "parser": parse_seal_contract_batch_excel,
+        "form_builder": build_seal_contract_batch_form_widgets,
+        "upload_label": "选择新签/续签派遣员工合同批量用章明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）",
+        "option_label": "签约主体",
     },
     "seal_terminate_cert": {
         "label": "解除（终止）劳动合同证明书用印申请",
@@ -199,21 +201,21 @@ SEAL_KINDS: dict[str, dict] = {
         "upload_label": "选择解除（终止）劳动合同证明书用印明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）",
         "option_label": "印章类型",
     },
-    "seal_contract_batch": {
-        "label": "新签/续签派遣员工合同批量用章用印申请",
-        "env": "FEISHU_SEAL_CONTRACT_BATCH_APPROVAL_CODE",
-        "parser": parse_seal_contract_batch_excel,
-        "form_builder": build_seal_contract_batch_form_widgets,
-        "upload_label": "选择新签/续签派遣员工合同批量用章明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）",
-        "option_label": "签约主体",
+    "seal_reseal": {
+        "label": "补签派遣员工合同用章申请",
+        "env": "FEISHU_SEAL_RESEAL_APPROVAL_CODE",
+        "parser": parse_seal_reseal_excel,
+        "form_builder": build_seal_reseal_form_widgets,
+        "upload_label": "选择补签派遣员工合同用章明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）",
+        "option_label": "印章类型",
     },
 }
 
 # 各审批类型的上下架开关（False 时代码保留、仅从界面隐藏）。
 KIND_ENABLED_FLAGS: dict[str, bool] = {
-    "seal_reseal": True,
-    "seal_terminate_cert": True,
     "seal_contract_batch": True,
+    "seal_terminate_cert": True,
+    "seal_reseal": True,
     "meal2": MEAL2_KIND_ENABLED,
     "meal": MEAL_KIND_ENABLED,
     "bonus": BONUS_KIND_ENABLED,
@@ -221,10 +223,11 @@ KIND_ENABLED_FLAGS: dict[str, bool] = {
 }
 
 # 模板文件 → 所属审批类型；类型隐藏时模板随之从界面隐藏（文件保留）。
+# 字典顺序 = 下载区展示顺序（与审批类型选择器一致）。
 TEMPLATE_FILES_BY_KIND: dict[str, str] = {
-    "补签派遣员工合同用章申请模板.xlsx": "seal_reseal",
-    "解除（终止）劳动合同证明书用印申请模板.xlsx": "seal_terminate_cert",
     "新签／续签派遣员工合同批量用章用印申请模板.xlsx": "seal_contract_batch",
+    "解除（终止）劳动合同证明书用印申请模板.xlsx": "seal_terminate_cert",
+    "补签派遣员工合同用章申请模板.xlsx": "seal_reseal",
     "两列金额明细表模板.xlsx": "meal2",
     "返餐费明细表模板.xlsx": "meal",
     "工会会费明细表模板.xlsx": "meal",
@@ -549,10 +552,10 @@ def render_step1_upload():
         st.markdown("**模板下载（可直接填写后上传）：**")
         templates_dir = _PROJECT_ROOT / "templates"
         # 模板随所属审批类型一起上下架：类型隐藏时模板文件保留在仓库，
-        # 仅不在界面展示。
+        # 仅不在界面展示。顺序 = 字典定义顺序（与审批类型选择器一致）。
         template_paths = [
             templates_dir / name
-            for name in sorted(TEMPLATE_FILES_BY_KIND)
+            for name in TEMPLATE_FILES_BY_KIND
             if KIND_ENABLED_FLAGS.get(TEMPLATE_FILES_BY_KIND[name], False)
         ]
         if INSURANCE_KIND_ENABLED:
@@ -581,9 +584,11 @@ def render_step1_upload():
         if st.session_state.approval_kind in SEAL_KINDS:
             meta = SEAL_KINDS[st.session_state.approval_kind]
             st.caption(
-                f"用章/用印模板：表头上方「用章事由」为必填，「备注」可选；"
-                f"{meta['option_label']}需填写：{'、'.join(seal_option_labels(meta['option_label']))}。"
+                f"用章/用印模板首行即列头，只需填明细列表；"
+                f"{meta['option_label']}需填写：{'、'.join(seal_option_labels(meta['option_label']))}；"
+                "合同/证明份数默认 4 份，可按需修改。"
             )
+            st.caption("用章事由提交时按明细自动生成（人数、份数），步骤 2 中可修改；备注也在步骤 2 填写。")
             if st.session_state.approval_kind == "seal_reseal":
                 st.caption("补签合同：合同开始/结束时间填写日期（如 2026-01-01），期限天数自动计算；每行需填写补签原因。")
             if st.session_state.approval_kind == "seal_contract_batch":
@@ -713,9 +718,10 @@ def render_step2_preview():
                     continue
 
                 if kind in SEAL_KINDS:
-                    # 用章表单没有标题控件，用「用章事由」替代标题编辑。
+                    # 用章表单没有标题控件，用「用章事由」替代标题编辑
+                    # （解析时按明细自动生成默认值，此处可修改）。
                     reason = st.text_input(
-                        "用章事由（表单必填）",
+                        "用章事由（自动生成，可修改）",
                         value=item.get("reason", ""),
                         key=f"batch_reason_{idx}",
                     )

@@ -62,19 +62,11 @@ def _make_reseal_xlsx(
     reason_cell: str = "合同到期未及时续签，现补签",
     copies=1,
     omit: str | None = None,
-    reason_style: str = "same_cell",
+    preamble: bool = False,
     total_copies: int | None = None,
 ) -> None:
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws["A1"] = "用章事由："
-    if reason_style == "same_cell":
-        ws["A1"] = f"用章事由：补签2026年到期派遣员工劳动合同"
-    else:
-        ws["B1"] = "补签2026年到期派遣员工劳动合同"
-    ws["A2"] = "备注："
-    ws["B2"] = "加急处理"
-    ws.append([])
     headers = ["序号", "派遣员工姓名", "合同开始时间", "合同结束时间", "印章类型", "补签原因", "合同份数"]
     if omit:
         headers.remove(omit)
@@ -88,34 +80,27 @@ def _make_reseal_xlsx(
         ws.append(row)
     if total_copies is not None:
         ws.append(["合计", None, None, None, None, None, total_copies])
-    ws.append([])
-    ws.append(["制表：张三"])
+    if preamble:
+        ws.insert_rows(1)
+        ws["A1"] = "说明：本表由XX单位提供（表前说明行不影响解析）"
     wb.save(path)
 
 
 def _make_term_xlsx(path: Path, *, seal: str = "吉林分公司公章", copies=2) -> None:
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws["A1"] = "用章事由："
-    ws["B1"] = "为离职派遣员工办理解除劳动合同证明书用印"
-    ws.append([])
     ws.append(["序号", "派遣员工姓名", "证明份数", "印章类型"])
     for serial, name in [("1", "李四"), ("2", "王五")]:
         ws.append([int(serial), name, copies, seal])
-    ws.append(["制表：张三"])
     wb.save(path)
 
 
 def _make_batch_xlsx(path: Path, *, entity: str = "彩虹公司", id_copies="1") -> None:
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws["A1"] = "用章事由："
-    ws["B1"] = "2026年新签及续签派遣员工劳动合同批量用章"
-    ws.append([])
     ws.append(["序号", "派遣员工姓名", "签约主体", "合同份数", "身份证复印件盖公章份数"])
     for serial, name in [("1", "李四"), ("2", "王五"), ("3", "赵六")]:
         ws.append([int(serial), name, entity, 2, id_copies])
-    ws.append(["制表：张三"])
     wb.save(path)
 
 
@@ -157,21 +142,23 @@ class TestParseSealReseal:
         assert first.interval_days == "364"
         assert first.reason == "合同到期未及时续签，现补签"
 
-    def test_reason_remark_maker(self, reseal_xlsx: Path):
+    def test_auto_reason_and_empty_remark(self, reseal_xlsx: Path):
+        """用章事由按明细自动生成；备注留空（界面填写）。"""
         sheet = parse_seal_reseal_excel(reseal_xlsx)
-        assert sheet.reason == "补签2026年到期派遣员工劳动合同"
-        assert sheet.remark == "加急处理"
-        assert sheet.maker == "张三"
+        assert sheet.reason == "补签派遣员工合同用章（共3人，合同份数合计3份）"
+        assert sheet.remark == ""
         assert sheet.copies_label == "合同份数"
         assert sheet.option_label == "印章类型"
         assert sheet.total_copies == 3
         assert sheet.warnings == []
 
-    def test_reason_in_next_cell(self, tmp_path: Path):
-        path = tmp_path / "next_cell.xlsx"
-        _make_reseal_xlsx(path, reason_style="next_cell")
+    def test_preamble_row_above_header(self, tmp_path: Path):
+        """表前说明行不影响解析（表头按列名识别）。"""
+        path = tmp_path / "preamble.xlsx"
+        _make_reseal_xlsx(path, preamble=True)
         sheet = parse_seal_reseal_excel(path)
-        assert sheet.reason == "补签2026年到期派遣员工劳动合同"
+        assert len(sheet.rows) == 3
+        assert sheet.warnings == []
 
     def test_date_string_formats(self, tmp_path: Path):
         for start, end, days in [
@@ -227,23 +214,12 @@ class TestParseSealReseal:
         with pytest.raises(ValueError, match="未找到表头行"):
             parse_seal_reseal_excel(path)
 
-    def test_missing_reason_warning(self, tmp_path: Path):
-        """缺少用章事由 → 解析成功但带警告（界面提交前拦截）。"""
-        path = tmp_path / "noinfo.xlsx"
-        _make_reseal_xlsx(path)
-        wb = openpyxl.load_workbook(path)
-        ws = wb.active
-        ws["A1"] = None
-        wb.save(path)
-        sheet = parse_seal_reseal_excel(path)
-        assert any("缺少用章事由" in w for w in sheet.warnings)
-
     def test_interleaved_blank_row_warning(self, tmp_path: Path):
         path = tmp_path / "blank.xlsx"
         _make_reseal_xlsx(path)
         wb = openpyxl.load_workbook(path)
         ws = wb.active
-        ws.insert_rows(6)  # 数据行之间插入空行
+        ws.insert_rows(3)  # 数据行之间（李四与王五之间）插入空行
         wb.save(path)
         sheet = parse_seal_reseal_excel(path)
         assert any("跳过 1 行" in w for w in sheet.warnings)
@@ -433,23 +409,26 @@ class TestShippedSealTemplates:
     def test_reseal_template_parses_cleanly(self):
         sheet = parse_seal_reseal_excel(RESEAL_TEMPLATE)
         assert len(sheet.rows) == 5
-        assert sheet.total_copies == 6
-        assert sheet.reason.startswith("补签")
-        assert sheet.maker == "张三"
+        assert sheet.total_copies == 20  # 5 行 × 默认 4 份
+        assert all(r.copies == 4 for r in sheet.rows)
+        assert sheet.reason == "补签派遣员工合同用章（共5人，合同份数合计20份）"
+        assert sheet.remark == ""
         assert sheet.warnings == []
 
     def test_term_template_parses_cleanly(self):
         sheet = parse_seal_terminate_cert_excel(TERM_TEMPLATE)
         assert len(sheet.rows) == 4
-        assert sheet.total_copies == 5
-        assert sheet.maker == "张三"
+        assert sheet.total_copies == 16  # 4 行 × 默认 4 份
+        assert all(r.copies == 4 for r in sheet.rows)
+        assert sheet.reason == "解除（终止）劳动合同证明书用印（共4人，证明份数合计16份）"
         assert sheet.warnings == []
 
     def test_batch_template_parses_cleanly(self):
         sheet = parse_seal_contract_batch_excel(BATCH_TEMPLATE)
         assert len(sheet.rows) == 5
-        assert sheet.total_copies == 10
-        assert sheet.maker == "张三"
+        assert sheet.total_copies == 20  # 5 行 × 默认 4 份
+        assert all(r.copies == 4 for r in sheet.rows)
+        assert sheet.reason == "新签/续签派遣员工劳动合同批量用章用印（共5人，合同份数合计20份）"
         assert sheet.warnings == []
 
     def test_templates_no_real_pii(self):
@@ -461,7 +440,6 @@ class TestShippedSealTemplates:
             sheet = parser(path)
             for row in sheet.rows:
                 assert row.name in FAKE_NAMES, f"Real name leaked: {row.name}"
-            assert sheet.maker in FAKE_NAMES
 
     def test_builders_accept_templates(self):
         cases = [

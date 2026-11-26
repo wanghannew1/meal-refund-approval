@@ -1476,11 +1476,10 @@ def parse_insurance_excel(
 # - 解除（终止）劳动合同证明书用印申请（6B6D7EFF-C1A7-4021-B7D5-2963C01D509C）
 # - 新签/续签派遣员工合同批量用章用印申请（FFF8A3B3-7917-44F1-8B06-3F4B0183A4F8）
 #
-# 三个审批表单均为「表头信息区 + 明细列表」结构，不含标题控件：
-#   顶层：用章事由（必填）、备注（选填）、附件（选填）
-#   明细行：派遣员工姓名 + 各流程专属列（份数/印章类型/合同起止等）
-# Excel 约定：表头行之前的「用章事由：」「备注：」单元格为表头信息区，
-# 明细从表头行开始；序号列可选；每个 Excel 文件对应一个审批实例。
+# 三个审批表单均为「用章事由 + 明细列表 + 备注 + 附件」结构，不含标题控件。
+# Excel 只需一张明细列表：首行即列头，序号列可选，每个文件对应一个审批实例。
+# 用章事由不来自 Excel：解析后按人数/份数自动生成，界面可再修改；
+# 备注也在界面填写。表头按列名识别（列序随意），故表前有说明行也不影响。
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -1518,14 +1517,14 @@ class SealDetailSheet:
     """解析后的用章/用印批量申请明细表。
 
     Attributes:
-        title: Excel 首格文本（仅预览展示；审批表单没有标题控件）。
-        reason: 用章事由（表单必填；为空时由界面在提交前拦截）。
-        remark: 表头信息区的备注（选填）。
+        title: 保留字段，用章流程恒为空串（表单没有标题控件）。
+        reason: 用章事由（按明细自动生成，界面可修改）。
+        remark: 备注恒为空串（备注在界面填写）。
         rows: 明细数据行。
         copies_label: 份数列名（合同份数 / 证明份数），预览与合计展示用。
         option_label: 单选列名（印章类型 / 签约主体），预览表头用。
         total_copies: 明细份数合计。
-        maker: 制表人（扫描「制表：」行）。
+        maker: 保留字段，恒为空串（用章流程不采集制表人）。
         warnings: 警告信息列表。
     """
 
@@ -1577,27 +1576,15 @@ def _resolve_seal_header(cell_value: object) -> str | None:
     return None
 
 
-def _extract_labeled_value(rows: list[list[object]], label: str) -> str:
-    """在整表中找「label」开头的标签单元格并取其值。
-
-    支持两种写法：值写在同一单元格冒号后（用章事由：xxx），
-    或写在同行右侧第一个非空单元格（用章事由： | xxx）。
-    找不到标签时返回空串。
-    """
-    for row in rows:
-        for i, cell in enumerate(row):
-            text = str(cell).strip() if cell is not None else ""
-            if not text.startswith(label):
-                continue
-            rest = text[len(label):].lstrip("：:　 ").strip()
-            if rest:
-                return rest
-            for nxt in row[i + 1:]:
-                nxt_text = str(nxt).strip() if nxt is not None else ""
-                if nxt_text:
-                    return nxt_text
-            return ""
-    return ""
+def _auto_seal_reason(kind: str, rows: list[SealDetailRow]) -> str:
+    """按明细自动生成用章事由（界面可再修改）。"""
+    n = len(rows)
+    total = sum(r.copies for r in rows)
+    if kind == "seal_reseal":
+        return f"补签派遣员工合同用章（共{n}人，合同份数合计{total}份）"
+    if kind == "seal_terminate_cert":
+        return f"解除（终止）劳动合同证明书用印（共{n}人，证明份数合计{total}份）"
+    return f"新签/续签派遣员工劳动合同批量用章用印（共{n}人，合同份数合计{total}份）"
 
 
 def _parse_seal_date_cell(value: object, row_no: int, label: str) -> str:
@@ -1707,9 +1694,10 @@ def _parse_seal_form_excel(
 ) -> SealDetailSheet:
     """解析用章/用印批量申请明细表（三个流程共用骨架）。
 
-    表头按列名识别（列序随意、序号列可选）；「用章事由」「备注」从
-    表头信息区提取；印章类型/签约主体文本实时校验为表单选项 value；
-    补签流程自动按合同起止时间计算期限天数。
+    Excel 只需一张明细列表，首行即列头；表头按列名识别（列序随意、
+    序号列可选），故表前有说明行也不影响。用章事由按解析结果自动
+    生成（界面可修改），备注由界面填写；印章类型/签约主体文本实时
+    校验为表单选项 value；补签流程自动按合同起止时间计算期限天数。
     """
     # form_builder 依赖本模块，函数内延迟导入避免循环依赖。
     from app.form_builder import resolve_seal_option_value
@@ -1719,15 +1707,11 @@ def _parse_seal_form_excel(
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix == ".xls":
-        title, all_rows = _read_xls(path, sheet_name=sheet_name, sheet_index=sheet_index)
+        _title, all_rows = _read_xls(path, sheet_name=sheet_name, sheet_index=sheet_index)
     elif suffix == ".xlsx":
-        title, all_rows = _read_xlsx(path, sheet_name=sheet_name, sheet_index=sheet_index)
+        _title, all_rows = _read_xlsx(path, sheet_name=sheet_name, sheet_index=sheet_index)
     else:
         raise ValueError(f"不支持的文件格式: {suffix}，仅支持 .xls 和 .xlsx")
-
-    # 表头信息区：用章事由（必填）、备注（选填）
-    reason = _extract_labeled_value(all_rows, "用章事由")
-    remark = _extract_labeled_value(all_rows, "备注")
 
     # 定位表头行
     header_row_idx: int | None = None
@@ -1774,7 +1758,6 @@ def _parse_seal_form_excel(
     name_counts: dict[str, int] = {}
     total_copies = 0
     copies_total_cell = ""
-    maker = ""
     last_data_row_idx: int | None = None
 
     for idx in range(header_row_idx + 1, len(all_rows)):
@@ -1877,16 +1860,6 @@ def _parse_seal_form_excel(
             )
         )
 
-    # 制表人扫描：全表任意「制表：」单元格（新模板通常在表格末尾）
-    for row in all_rows[header_row_idx + 1:]:
-        for cell in row:
-            cell_text = str(cell).strip() if cell is not None else ""
-            if "制表" in cell_text:
-                maker = _extract_maker(cell_text)
-                break
-        if maker:
-            break
-
     if not rows:
         if row_errors:
             raise ValueError("；".join(row_errors[:5]))
@@ -1897,8 +1870,8 @@ def _parse_seal_form_excel(
     if row_errors:
         raise ValueError("；".join(row_errors[:8]))
 
-    if not reason:
-        warnings.append("缺少用章事由（表单必填，请在表格或界面中补充）")
+    # 用章事由按解析结果自动生成（界面可再修改）；备注在界面填写。
+    reason = _auto_seal_reason(kind, rows)
 
     # 仅提示夹在数据行之间的空行/缺姓名行（表格末尾的空行为排版噪音）。
     if last_data_row_idx is not None:
@@ -1924,14 +1897,13 @@ def _parse_seal_form_excel(
             pass
 
     return SealDetailSheet(
-        title=title,
+        title="",
         reason=reason,
-        remark=remark,
+        remark="",
         rows=rows,
         copies_label=spec.copies_label,
         option_label=spec.option_label,
         total_copies=total_copies,
-        maker=maker,
         warnings=warnings,
     )
 
