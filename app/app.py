@@ -353,6 +353,10 @@ def _reset_sheet_state():
     st.session_state.uploaded_file_sig = None
     st.session_state.sheet_infos = None
     st.session_state.selected_sheet_name = None
+    # 上传控件绑定了固定 key，文件不再随 label（审批类型）变化自动清空，
+    # 切换类型时显式清掉，避免旧文件被带入新类型重新解析报错。
+    # 仅可在上传控件实例化前调用（各调用点均在 main() 前段）。
+    st.session_state["batch_files"] = []
 
 
 def _clear_batch_items():
@@ -631,7 +635,11 @@ def render_step1_upload():
     else:
         label = "选择返餐费或工会会费明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）"
 
-    uploaded_files = st.file_uploader(label, type=["xls", "xlsx"], accept_multiple_files=True)
+    # 绑定固定 key：控件身份不随 label（审批类型）变化，盲传自动切换
+    # 审批类型后已上传文件与解析结果得以保留。
+    uploaded_files = st.file_uploader(
+        label, type=["xls", "xlsx"], accept_multiple_files=True, key="batch_files"
+    )
 
     # 盲传自动切换的一次性提示（重跑后在选择器已就位时显示）。
     switch_note = st.session_state.pop("kind_switch_note", None)
