@@ -30,11 +30,15 @@ from app.excel_parser import (
     parse_meal_two_amount_excel,
     parse_bonus_excel,
     parse_insurance_excel,
+    parse_seal_reseal_excel,
+    parse_seal_terminate_cert_excel,
+    parse_seal_contract_batch_excel,
     list_sheets,
     list_insurance_sheets,
     MealRefundSheet,
     BonusSheet,
     InsuranceSheet,
+    SealDetailSheet,
 )
 from app.form_builder import (
     build_form_widgets,
@@ -42,6 +46,10 @@ from app.form_builder import (
     build_bonus_form_widgets,
     build_insurance_form_widgets,
     build_caihong_insurance_form_widgets,
+    build_seal_reseal_form_widgets,
+    build_seal_terminate_cert_form_widgets,
+    build_seal_contract_batch_form_widgets,
+    seal_option_labels,
 )
 from app.feishu_api import (
     get_tenant_token,
@@ -84,8 +92,8 @@ if "submitted" not in st.session_state:
 if "tmp_file_path" not in st.session_state:
     st.session_state.tmp_file_path = None
 if "approval_kind" not in st.session_state:
-    # 默认两列金额（审批类型选择器首项），与 visible_kind_options 首项一致。
-    st.session_state.approval_kind = "meal2"
+    # 默认补签用章（审批类型选择器首项），与 visible_kind_options 首项一致。
+    st.session_state.approval_kind = "seal_reseal"
 if "approval_entity" not in st.session_state:
     # 初值写 DEFAULT_INSURANCE_ENTITY 对应的字面量（此处位于常量定义之前）。
     # 若该主体被隐藏（彩虹公司暂时停用），main() 会归位到第一个可见主体。
@@ -164,16 +172,78 @@ def get_default_insurance_entity() -> str:
 # 恢复上线改回 True 即可；各主体的单独开关见 CAIHONG_INSURANCE_ENABLED。
 INSURANCE_KIND_ENABLED = False
 
+# 简易费用（单金额/两列金额）与奖金入口暂时整体下线（2026-11-25）：
+# 三个工具的解析/表单构建/提交代码全部保留，仅从「审批类型」选择器
+# 隐藏，恢复上线改回 True 即可。
+MEAL_KIND_ENABLED = False
+MEAL2_KIND_ENABLED = False
+BONUS_KIND_ENABLED = False
+
+# 用章/用印批量申请流程（2026-11-25 上线）。三个审批定义由同一模板
+# 复制而来，控件 ID 高度重合；Code 全部来自环境变量，代码不硬编码。
+# 各流程仅限对应类型文件使用（审批定义名称含「其他文件勿用」）。
+SEAL_KINDS: dict[str, dict] = {
+    "seal_reseal": {
+        "label": "补签派遣员工合同用章申请",
+        "env": "FEISHU_SEAL_RESEAL_APPROVAL_CODE",
+        "parser": parse_seal_reseal_excel,
+        "form_builder": build_seal_reseal_form_widgets,
+        "upload_label": "选择补签派遣员工合同用章明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）",
+        "option_label": "印章类型",
+    },
+    "seal_terminate_cert": {
+        "label": "解除（终止）劳动合同证明书用印申请",
+        "env": "FEISHU_SEAL_TERMINATE_CERT_APPROVAL_CODE",
+        "parser": parse_seal_terminate_cert_excel,
+        "form_builder": build_seal_terminate_cert_form_widgets,
+        "upload_label": "选择解除（终止）劳动合同证明书用印明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）",
+        "option_label": "印章类型",
+    },
+    "seal_contract_batch": {
+        "label": "新签/续签派遣员工合同批量用章用印申请",
+        "env": "FEISHU_SEAL_CONTRACT_BATCH_APPROVAL_CODE",
+        "parser": parse_seal_contract_batch_excel,
+        "form_builder": build_seal_contract_batch_form_widgets,
+        "upload_label": "选择新签/续签派遣员工合同批量用章明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）",
+        "option_label": "签约主体",
+    },
+}
+
+# 各审批类型的上下架开关（False 时代码保留、仅从界面隐藏）。
+KIND_ENABLED_FLAGS: dict[str, bool] = {
+    "seal_reseal": True,
+    "seal_terminate_cert": True,
+    "seal_contract_batch": True,
+    "meal2": MEAL2_KIND_ENABLED,
+    "meal": MEAL_KIND_ENABLED,
+    "bonus": BONUS_KIND_ENABLED,
+    "insurance": INSURANCE_KIND_ENABLED,
+}
+
+# 模板文件 → 所属审批类型；类型隐藏时模板随之从界面隐藏（文件保留）。
+TEMPLATE_FILES_BY_KIND: dict[str, str] = {
+    "补签派遣员工合同用章申请模板.xlsx": "seal_reseal",
+    "解除（终止）劳动合同证明书用印申请模板.xlsx": "seal_terminate_cert",
+    "新签／续签派遣员工合同批量用章用印申请模板.xlsx": "seal_contract_batch",
+    "两列金额明细表模板.xlsx": "meal2",
+    "返餐费明细表模板.xlsx": "meal",
+    "工会会费明细表模板.xlsx": "meal",
+    "科研业绩津贴明细表模板.xlsx": "bonus",
+}
+
 
 def visible_kind_options() -> list[tuple[str, str]]:
     """(label, kind) pairs exposed in the 审批类型 selector, in display order."""
-    options = [
-        # 两列金额：2026-11 新增审批流程，独立解析器与表单构建，
-        # 不影响在用的单金额派遣员工流程。放首位作为默认选中项。
-        ("派遣员工简易费用明细表审批-两列金额", "meal2"),
-        ("派遣员工简易费用明细表审批", "meal"),
-        ("奖金发放审批", "bonus"),
-    ]
+    options = []
+    for kind, meta in SEAL_KINDS.items():
+        if KIND_ENABLED_FLAGS.get(kind, True):
+            options.append((meta["label"], kind))
+    if MEAL2_KIND_ENABLED:
+        options.append(("派遣员工简易费用明细表审批-两列金额", "meal2"))
+    if MEAL_KIND_ENABLED:
+        options.append(("派遣员工简易费用明细表审批", "meal"))
+    if BONUS_KIND_ENABLED:
+        options.append(("奖金发放审批", "bonus"))
     if INSURANCE_KIND_ENABLED:
         options.append(("五险一金审批", "insurance"))
     return options
@@ -195,6 +265,9 @@ def get_approval_code(kind: str, entity: str = DEFAULT_INSURANCE_ENTITY) -> str:
     """
     if kind == "bonus":
         return _require_env_code("FEISHU_BONUS_APPROVAL_CODE", "奖金发放审批 Code")
+    if kind in SEAL_KINDS:
+        meta = SEAL_KINDS[kind]
+        return _require_env_code(meta["env"], f"{meta['label']} Code")
     if kind == "meal2":
         # 两列金额派遣员工审批（2026-11 新增流程，独立于在用流程）
         return _require_env_code(
@@ -240,6 +313,9 @@ def kind_meta(kind: str, entity: str = DEFAULT_INSURANCE_ENTITY) -> tuple[str, s
             "奖金发放审批",
             _require_env_code("FEISHU_BONUS_APPROVAL_CODE", "奖金发放审批 Code"),
         )
+    if kind in SEAL_KINDS:
+        meta = SEAL_KINDS[kind]
+        return (meta["label"], get_approval_code(kind))
     if kind == "meal2":
         return (
             "派遣员工简易费用明细表审批-两列金额",
@@ -472,9 +548,13 @@ def render_step1_upload():
     with st.expander("模板下载", expanded=False):
         st.markdown("**模板下载（可直接填写后上传）：**")
         templates_dir = _PROJECT_ROOT / "templates"
-        # 五险一金分单位模板随 INSURANCE_KIND_ENABLED 一起上下架：
-        # 流程隐藏时模板文件保留在仓库，仅不在界面展示。
-        template_paths = sorted(templates_dir.glob("*.xlsx"))
+        # 模板随所属审批类型一起上下架：类型隐藏时模板文件保留在仓库，
+        # 仅不在界面展示。
+        template_paths = [
+            templates_dir / name
+            for name in sorted(TEMPLATE_FILES_BY_KIND)
+            if KIND_ENABLED_FLAGS.get(TEMPLATE_FILES_BY_KIND[name], False)
+        ]
         if INSURANCE_KIND_ENABLED:
             template_paths += sorted((templates_dir / "insurance").glob("*.xlsx"))
         if template_paths:
@@ -498,9 +578,21 @@ def render_step1_upload():
         if INSURANCE_KIND_ENABLED:
             st.caption("五险一金请使用对应的分单位模板（医保/社保/工伤/公积金），每月一个 sheet 或一个文件均可。")
         st.caption("两列金额：表头需含 姓名 和至少一个金额列；序号、身份证号、第二金额列可省略，单金额列表也可上传。末行合计行可选，有则自动校验。")
+        if st.session_state.approval_kind in SEAL_KINDS:
+            meta = SEAL_KINDS[st.session_state.approval_kind]
+            st.caption(
+                f"用章/用印模板：表头上方「用章事由」为必填，「备注」可选；"
+                f"{meta['option_label']}需填写：{'、'.join(seal_option_labels(meta['option_label']))}。"
+            )
+            if st.session_state.approval_kind == "seal_reseal":
+                st.caption("补签合同：合同开始/结束时间填写日期（如 2026-01-01），期限天数自动计算；每行需填写补签原因。")
+            if st.session_state.approval_kind == "seal_contract_batch":
+                st.caption("新签/续签合同：身份证复印件盖公章份数按文本填写（如 1）。")
 
     kind = st.session_state.approval_kind
-    if kind == "bonus":
+    if kind in SEAL_KINDS:
+        label = SEAL_KINDS[kind]["upload_label"]
+    elif kind == "bonus":
         label = "选择奖金明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）"
     elif kind == "meal2":
         label = "选择两列金额明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）"
@@ -540,7 +632,9 @@ def render_step1_upload():
             tmp_file.close()
 
             try:
-                if kind == "bonus":
+                if kind in SEAL_KINDS:
+                    sheet = SEAL_KINDS[kind]["parser"](tmp_file.name)
+                elif kind == "bonus":
                     sheet = parse_bonus_excel(tmp_file.name)
                 elif kind == "meal2":
                     sheet = parse_meal_two_amount_excel(tmp_file.name)
@@ -548,6 +642,11 @@ def render_step1_upload():
                     sheet = parse_insurance_excel(tmp_file.name)
                 else:
                     sheet = parse_meal_refund_excel(tmp_file.name)
+                if kind in SEAL_KINDS:
+                    # 用章流程：默认备注取表头信息区的「备注」单元格。
+                    default_remark = sheet.remark
+                else:
+                    default_remark = f"制表：{sheet.maker}" if sheet.maker else ""
                 st.session_state.batch_items.append(
                     {
                         "kind": kind,
@@ -555,7 +654,8 @@ def render_step1_upload():
                         "tmp_path": tmp_file.name,
                         "sheet": sheet,
                         "title": sheet.title,
-                        "remark": f"制表：{sheet.maker}" if sheet.maker else "",
+                        "reason": sheet.reason if isinstance(sheet, SealDetailSheet) else "",
+                        "remark": default_remark,
                         "file_code": None,
                         "instance_code": None,
                         "status": "pending",
@@ -572,6 +672,7 @@ def render_step1_upload():
                         "tmp_path": tmp_file.name,
                         "sheet": None,
                         "title": "",
+                        "reason": "",
                         "remark": "",
                         "file_code": None,
                         "instance_code": None,
@@ -611,14 +712,23 @@ def render_step2_preview():
                     st.error(f"解析失败：{item['error']}")
                     continue
 
-                # Editable title per file
-                title_key = f"batch_title_{idx}"
-                title = st.text_input(
-                    "审批标题",
-                    value=item["title"],
-                    key=title_key,
-                )
-                item["title"] = title
+                if kind in SEAL_KINDS:
+                    # 用章表单没有标题控件，用「用章事由」替代标题编辑。
+                    reason = st.text_input(
+                        "用章事由（表单必填）",
+                        value=item.get("reason", ""),
+                        key=f"batch_reason_{idx}",
+                    )
+                    item["reason"] = reason
+                else:
+                    # Editable title per file
+                    title_key = f"batch_title_{idx}"
+                    title = st.text_input(
+                        "审批标题",
+                        value=item["title"],
+                        key=title_key,
+                    )
+                    item["title"] = title
 
                 st.markdown("**明细数据：**")
 
@@ -669,7 +779,23 @@ def render_step2_preview():
 def _build_preview_data(kind, sheet):
     """Build preview dataframe rows for a parsed sheet."""
     data = []
-    if kind == "meal2":
+    if kind in SEAL_KINDS:
+        for i, row in enumerate(sheet.rows, start=1):
+            item = {
+                "序号": row.serial or str(i),
+                "派遣员工姓名": row.name,
+                sheet.copies_label: row.copies,
+                sheet.option_label: row.option_text,
+            }
+            if kind == "seal_reseal":
+                item["合同开始时间"] = row.start_date[:10] if row.start_date else ""
+                item["合同结束时间"] = row.end_date[:10] if row.end_date else ""
+                item["合同期限（天）"] = row.interval_days
+                item["补签原因"] = row.reason
+            if kind == "seal_contract_batch":
+                item["身份证复印件盖公章份数"] = row.id_copy_copies
+            data.append(item)
+    elif kind == "meal2":
         # 列名跟随原始 Excel 表头，与「列名称映射」一致；
         # 源表缺列（序号/身份证号/第二金额列）时预览同步省略。
         for i, row in enumerate(sheet.rows, start=1):
@@ -716,6 +842,9 @@ def _build_preview_data(kind, sheet):
 
 def _render_sheet_totals(kind, sheet):
     """Render total lines for a parsed sheet."""
+    if kind in SEAL_KINDS:
+        st.markdown(f"**{sheet.copies_label}合计：** {sheet.total_copies}")
+        return
     if kind == "meal2":
         st.markdown(f"**{sheet.amount1_column}合计：** {sheet.amount1_total or '—'}")
         if sheet.amount2_column:
@@ -750,7 +879,11 @@ def render_step3_remark():
             sheet = item["sheet"]
             if item["status"] == "error":
                 continue
-            default_remark = f"制表：{sheet.maker}" if sheet and sheet.maker else ""
+            if item["kind"] in SEAL_KINDS:
+                # 用章流程的备注默认值已在解析时取自表头信息区。
+                default_remark = ""
+            else:
+                default_remark = f"制表：{sheet.maker}" if sheet and sheet.maker else ""
             remark_key = f"batch_remark_{idx}"
             remark = st.text_area(
                 f"{item['filename']} 备注（可选）",
@@ -788,6 +921,17 @@ def render_step4_actions():
         if errors:
             st.error(f"{len(errors)} 个文件解析失败，无法提交，请检查后重新上传")
 
+        # 用章流程：用章事由为表单必填，提交前逐单校验。
+        missing_reason = [
+            it for it in pending
+            if kind in SEAL_KINDS and not (it.get("reason") or "").strip()
+        ]
+        if missing_reason:
+            st.error(
+                "以下审批单缺少用章事由（表单必填），请在步骤 2 中填写："
+                + "、".join(it["filename"] for it in missing_reason)
+            )
+
         if not pending:
             st.info("没有待提交的审批单")
         else:
@@ -801,7 +945,9 @@ def render_step4_actions():
                 "全部提交审批",
                 type="primary",
                 use_container_width=True,
-                disabled=not pending or st.session_state.get("batch_submitting", False),
+                disabled=not pending
+                or bool(missing_reason)
+                or st.session_state.get("batch_submitting", False),
             )
 
         if submit_all:
@@ -817,7 +963,9 @@ def render_step4_actions():
                     st.error(str(e))
                     st.session_state.batch_submitting = False
                     return
-                if kind == "bonus":
+                if kind in SEAL_KINDS:
+                    build_widgets = SEAL_KINDS[kind]["form_builder"]
+                elif kind == "bonus":
                     build_widgets = build_bonus_form_widgets
                 elif kind == "meal2":
                     build_widgets = build_meal2_form_widgets
@@ -842,12 +990,20 @@ def render_step4_actions():
                                 filename=item["filename"],
                             )
                             # 构建表单控件
-                            form_widgets = build_widgets(
-                                sheet,
-                                file_code=file_code,
-                                title=item["title"],
-                                remark=item["remark"],
-                            )
+                            if kind in SEAL_KINDS:
+                                form_widgets = build_widgets(
+                                    sheet,
+                                    file_code=file_code,
+                                    reason=item.get("reason", ""),
+                                    remark=item.get("remark", ""),
+                                )
+                            else:
+                                form_widgets = build_widgets(
+                                    sheet,
+                                    file_code=file_code,
+                                    title=item["title"],
+                                    remark=item["remark"],
+                                )
                             # 创建审批实例
                             instance_code = create_instance(
                                 token,
@@ -902,7 +1058,9 @@ def render_step4_actions():
     except RuntimeError as e:
         st.error(str(e))
         return
-    if kind == "bonus":
+    if kind in SEAL_KINDS:
+        build_widgets = SEAL_KINDS[kind]["form_builder"]
+    elif kind == "bonus":
         build_widgets = build_bonus_form_widgets
     elif kind == "meal2":
         build_widgets = build_meal2_form_widgets
@@ -912,6 +1070,22 @@ def render_step4_actions():
         ]
     else:
         build_widgets = build_form_widgets
+
+    def _build_current_form_widgets(file_code: str) -> list[dict]:
+        """按当前类型构建表单控件（用章流程无标题控件，传用章事由）。"""
+        if kind in SEAL_KINDS:
+            return build_widgets(
+                sheet,
+                file_code=file_code,
+                reason=sheet.reason,
+                remark=st.session_state.remark,
+            )
+        return build_widgets(
+            sheet,
+            file_code=file_code,
+            title=st.session_state.title,
+            remark=st.session_state.remark,
+        )
 
     col_preview, col_submit = st.columns(2)
 
@@ -924,12 +1098,7 @@ def render_step4_actions():
             else:
                 try:
                     # Build form with dummy file code for preview
-                    form_widgets = build_widgets(
-                        sheet,
-                        file_code="DRYRUN",
-                        title=st.session_state.title,
-                        remark=st.session_state.remark,
-                    )
+                    form_widgets = _build_current_form_widgets("DRYRUN")
                     preview = preview_instance(
                         token,
                         approval_code,
@@ -983,12 +1152,7 @@ def render_step4_actions():
                     )
 
                     # Build form widgets
-                    form_widgets = build_widgets(
-                        sheet,
-                        file_code=file_code,
-                        title=st.session_state.title,
-                        remark=st.session_state.remark,
-                    )
+                    form_widgets = _build_current_form_widgets(file_code)
 
                     # Create instance
                     instance_code = create_instance(
@@ -1044,7 +1208,28 @@ def main():
 
     kind = st.session_state.approval_kind
     entity_label = get_insurance_entity(st.session_state.approval_entity)["label"]
-    if kind == "bonus":
+    if kind == "seal_reseal":
+        st.title("补签派遣员工合同用章申请提交工具（批量）")
+        st.markdown(
+            "上传补签派遣员工合同用章明细表，每个文件生成一个独立审批单，"
+            "表内每行一位员工（含合同起止时间、印章类型、补签原因、合同份数）。"
+            "该流程仅限补签派遣员工合同使用，其他文件勿用。"
+        )
+    elif kind == "seal_terminate_cert":
+        st.title("解除（终止）劳动合同证明书用印申请提交工具（批量）")
+        st.markdown(
+            "上传解除（终止）劳动合同证明书用印明细表，每个文件生成一个独立审批单，"
+            "表内每行一位员工（含证明份数、印章类型）。"
+            "该流程仅限解除（终止）劳动合同证明书使用，其他文件勿用。"
+        )
+    elif kind == "seal_contract_batch":
+        st.title("新签/续签派遣员工合同批量用章用印申请提交工具（批量）")
+        st.markdown(
+            "上传新签/续签派遣员工合同批量用章明细表，每个文件生成一个独立审批单，"
+            "表内每行一位员工（含签约主体、合同份数、身份证复印件盖公章份数）。"
+            "该流程仅限新签/续签派遣员工合同使用，其他文件勿用。"
+        )
+    elif kind == "bonus":
         st.title("奖金发放审批提交工具（批量）")
         st.markdown("上传多个奖金明细表，每个文件生成一个独立审批单，逐个提交飞书审批流程。")
     elif kind == "insurance":
