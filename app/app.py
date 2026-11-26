@@ -96,6 +96,12 @@ if "tmp_file_path" not in st.session_state:
 if "approval_kind" not in st.session_state:
     # 默认新签/续签用章（审批类型选择器首项），与 visible_kind_options 首项一致。
     st.session_state.approval_kind = "seal_contract_batch"
+if "uploader_generation" not in st.session_state:
+    # 上传控件 key 的代数：手动切换审批类型时 +1，key 变化即得到全新
+    # 空控件（等效清空已传附件）；盲传自动切换不加代数，文件保留。
+    # file_uploader 是会话态只读控件，无法直接写其 key 清空（见
+    # _reset_sheet_state 注释），只能靠换 key 重建。
+    st.session_state.uploader_generation = 0
 if "approval_entity" not in st.session_state:
     # 初值写 DEFAULT_INSURANCE_ENTITY 对应的字面量（此处位于常量定义之前）。
     # 若该主体被隐藏（彩虹公司暂时停用），main() 会归位到第一个可见主体。
@@ -353,11 +359,8 @@ def _reset_sheet_state():
     st.session_state.uploaded_file_sig = None
     st.session_state.sheet_infos = None
     st.session_state.selected_sheet_name = None
-    # 注意：不要在这里写 st.session_state["batch_files"]——file_uploader 是
-    # Streamlit 会话态只读控件，key 被手动赋值后（st.rerun 触发的重跑不
-    # 做 _compact_state，赋值会跨轮存活）控件创建时直接抛
-    # StreamlitValueAssignmentNotAllowedError。上传控件绑定了固定 key，
-    # 文件跨类型切换保留；切换后的文件归属由盲传识别与重新解析接管。
+    # 上传控件代数 +1（换 key 重建为空控件，等效清空附件）。
+    _clear_attachments()
 
 
 def _clear_batch_items():
@@ -556,14 +559,54 @@ def _uniform_detected_kind(items: list[dict], current_kind: str) -> str | None:
     """盲传识别后判断是否应自动切换「审批类型」选择器。
 
     全部文件识别为同一个用章流程、且与当前所选类型不同时返回该流程
-    kind；有混传（识别结果不一致，或部分识别失败保持所选类型）或
-    识别结果与所选类型一致时返回 None（维持现状，按文件各自流程处理）。
+    kind；识别结果与所选类型一致时返回 None（无需切换）。
     """
     kinds = {it.get("kind") for it in items if it.get("kind") in SEAL_KINDS}
     if len(kinds) != 1:
         return None
     (detected,) = tuple(kinds)
     return detected if detected != current_kind else None
+
+
+def _seal_routing_summary(items: list[dict]) -> dict[str, list[str]]:
+    """按目标流程归组解析成功的用章文件（提交路由展示用）。"""
+    flows: dict[str, list[str]] = {}
+    for it in items:
+        if it.get("status") == "error":
+            continue
+        it_kind = it.get("kind")
+        if it_kind in SEAL_KINDS:
+            flows.setdefault(SEAL_KINDS[it_kind]["label"], []).append(it["filename"])
+    return flows
+
+
+def _attachment_lock(items: list[dict]) -> tuple[bool, str | None]:
+    """附件锁定状态：(是否锁定, 锁定的流程 kind)。
+
+    有附件即锁定（「审批类型」选择器灰化，须先「清空附件」）；锁定
+    流程取解析成功文件的唯一识别流程，供选择器显示值对齐实际路由
+    （混传被拒收，正常不会出现多流程；全部解析失败时为 None）。
+    """
+    if not items:
+        return False, None
+    kinds = {it.get("kind") for it in items if it.get("status") != "error"}
+    if len(kinds) == 1:
+        (locked,) = tuple(kinds)
+        return True, locked
+    return True, None
+
+
+def _clear_attachments():
+    """清空已上传附件：解析结果清空 + 上传控件换代数重建为空。
+
+    file_uploader 是 Streamlit 会话态只读控件，无法直接写其 key 清空
+    （写了会在控件创建时抛 StreamlitValueAssignmentNotAllowedError），
+    只能靠换 key 重建得到全新空控件。
+    """
+    _clear_batch_items()
+    st.session_state.uploader_generation = (
+        st.session_state.get("uploader_generation", 0) + 1
+    )
 
 
 def render_step1_upload():
@@ -636,19 +679,34 @@ def render_step1_upload():
     else:
         label = "选择返餐费或工会会费明细表（.xls / .xlsx，可多选，每个文件生成一个审批单）"
 
-    # 绑定固定 key：控件身份不随 label（审批类型）变化，盲传自动切换
-    # 审批类型后已上传文件与解析结果得以保留。该 key 为只读控件 key，
-    # 代码中不得手动赋值（见 _reset_sheet_state 注释）。
+    # key 带「代数」后缀：手动切换审批类型时代数 +1，控件重建为空
+    # （等效清空附件）；盲传自动切换不改代数，文件与解析结果保留。
+    # 该 key 为只读控件 key，代码中不得手动赋值（见
+    # _reset_sheet_state 注释）。
     uploaded_files = st.file_uploader(
-        label, type=["xls", "xlsx"], accept_multiple_files=True, key="batch_files"
+        label,
+        type=["xls", "xlsx"],
+        accept_multiple_files=True,
+        key=f"batch_files_{st.session_state.uploader_generation}",
     )
 
-    # 盲传自动切换的一次性提示（重跑后在选择器已就位时显示）。
+    # 一次性提示（重跑后在选择器已就位时显示）：
+    # kind_switch_note 盲传识别自动切换；reject_note 混传附件拒收。
     switch_note = st.session_state.pop("kind_switch_note", None)
     if switch_note:
         st.info(switch_note)
+    reject_note = st.session_state.pop("reject_note", None)
+    if reject_note:
+        st.error(reject_note)
 
     st.caption("每个 Excel 文件会被解析为独立的审批单，提交时逐个生成飞书审批实例。")
+
+    # 附件锁定：有附件时「审批类型」选择器灰化（见 main），此处提供
+    # 清空入口；file_uploader 只读，清空靠换代数重建（_clear_attachments）。
+    if st.session_state.batch_items:
+        if st.button("清空附件"):
+            _clear_attachments()
+            st.rerun()
 
     if not uploaded_files:
         _clear_batch_items()
@@ -664,6 +722,7 @@ def render_step1_upload():
     if current_sigs != existing_sigs:
         # 文件集合变化，先清理旧状态再重新解析全部
         _clear_batch_items()
+        detected_kinds: set[str] = set()
         for uploaded_file in uploaded_files:
             file_sig = (
                 f"{uploaded_file.name}:{getattr(uploaded_file, 'size', None)}:"
@@ -681,12 +740,9 @@ def render_step1_upload():
                     # 用章三流程：按表头列签名识别文件真实归属，盲传
                     # 传错时自动纠正到正确流程解析、预览与提交。
                     detected = detect_seal_kind(tmp_file.name)
-                    if detected and detected != kind:
+                    if detected:
                         item_kind = detected
-                        st.info(
-                            f"「{uploaded_file.name}」识别为"
-                            f"「{SEAL_KINDS[item_kind]['label']}」，已按该流程解析。"
-                        )
+                        detected_kinds.add(detected)
                     sheet = SEAL_KINDS[item_kind]["parser"](tmp_file.name)
                 elif kind == "bonus":
                     sheet = parse_bonus_excel(tmp_file.name)
@@ -737,6 +793,19 @@ def render_step1_upload():
                     }
                 )
 
+        # 一次只能上传同一流程的附件：识别出多种流程时整批拒收，
+        # 清空后请按流程分开上传（识别失败的文件不参与冲突判定）。
+        if kind in SEAL_KINDS and len(detected_kinds) > 1:
+            names = "、".join(
+                f"「{SEAL_KINDS[k]['label']}」" for k in sorted(detected_kinds)
+            )
+            _clear_attachments()
+            st.session_state.reject_note = (
+                f"一次只能上传同一流程的附件（识别到：{names}），"
+                "已拒收并清空，请按流程分开上传。"
+            )
+            st.rerun()
+
         # 全部文件同属一个与所选类型不同的用章流程 → 「审批类型」
         # 选择器跟随切换（st.rerun 后在选择器实例化前生效）。
         switch_kind = _uniform_detected_kind(st.session_state.batch_items, kind)
@@ -746,6 +815,19 @@ def render_step1_upload():
                 f"已按上传文件自动识别，审批类型切换为「{SEAL_KINDS[switch_kind]['label']}」"
             )
             st.rerun()
+
+    # 提交路由展示（独立于「审批类型」选择器的只读组件）：显示本批
+    # 文件实际要发到的流程。
+    flows = _seal_routing_summary(st.session_state.batch_items)
+    if flows:
+        if len(flows) == 1:
+            (lbl, fns), = flows.items()
+            st.success(f"本批 {len(fns)} 个审批单将提交到「{lbl}」")
+        else:
+            detail = "；".join(
+                f"「{lbl}」← {len(fns)} 个文件" for lbl, fns in flows.items()
+            )
+            st.info(f"按文件各自提交：{detail}")
     return
 
 
@@ -1331,14 +1413,20 @@ def main():
     if not render_login_gate():
         return
 
-    # 盲传识别触发的审批类型自动切换：必须在选择器实例化前改写其
-    # key 状态，否则选择器仍显示旧类型，会把审批类型又改回去。
+    # 附件锁定：已上传附件（batch_items 非空）时「审批类型」选择器
+    # 灰化不可选，须在步骤 1 点「清空附件」后才能重选。
+    attachments_locked, locked_kind = _attachment_lock(st.session_state.batch_items)
+
+    # 盲传识别触发的审批类型自动切换（以及锁定期间显示值对齐实际
+    # 路由，如重登录后 radio 状态丢失回落默认值时）：必须在选择器
+    # 实例化前改写其 key 状态，否则选择器仍显示旧类型。
     pending_kind = st.session_state.pop("pending_approval_kind", None)
-    if pending_kind in kind_keys and pending_kind != st.session_state.approval_kind:
-        st.session_state.approval_kind = pending_kind
+    target_kind = pending_kind or locked_kind
+    if target_kind in kind_keys and target_kind != st.session_state.approval_kind:
+        st.session_state.approval_kind = target_kind
         st.session_state["approval_kind_selector"] = {
             k: label for label, k in kind_options
-        }[pending_kind]
+        }[target_kind]
 
     # Approval type selector：仅展示可见类型（五险一金暂时整体下线，代码保留）。
     # 绑定 key 以支持盲传识别后程序化切换选中项。
@@ -1347,7 +1435,10 @@ def main():
         [label for label, _ in kind_options],
         horizontal=True,
         key="approval_kind_selector",
+        disabled=attachments_locked,
     )
+    if attachments_locked:
+        st.caption("🔒 已上传附件，审批类型已锁定；如需切换，请在下方上传处点击「清空附件」。")
     new_kind = dict(kind_options)[kind_label]
     if new_kind != st.session_state.approval_kind:
         st.session_state.approval_kind = new_kind

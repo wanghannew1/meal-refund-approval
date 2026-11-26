@@ -416,6 +416,134 @@ class TestUniformDetectedKind:
         assert self._fn()([], "seal_reseal") is None
 
 
+# ── 附件锁定 / 清空 / 路由展示 ────────────────────────────────────────
+
+class TestAttachmentLock:
+    """有附件即锁定审批类型选择器；锁定流程取唯一识别流程。"""
+
+    def _fn(self):
+        from app.app import _attachment_lock
+
+        return _attachment_lock
+
+    def test_no_items_unlocked(self):
+        assert self._fn()([]) == (False, None)
+
+    def test_uniform_items_locked_to_kind(self):
+        items = [{"kind": "seal_reseal", "status": "pending"}]
+        assert self._fn()(items) == (True, "seal_reseal")
+
+    def test_error_items_excluded_from_kind(self):
+        items = [{"kind": "seal_reseal", "status": "error"}]
+        assert self._fn()(items) == (True, None)
+
+    def test_mixed_kinds_locked_without_kind(self):
+        items = [
+            {"kind": "seal_reseal", "status": "pending"},
+            {"kind": "seal_terminate_cert", "status": "pending"},
+        ]
+        assert self._fn()(items) == (True, None)
+
+
+class TestClearAttachments:
+    def test_clears_items_and_bumps_generation(self):
+        import streamlit as st
+
+        from app.app import _clear_attachments
+
+        st.session_state.batch_items = [{"tmp_path": None, "kind": "seal_reseal"}]
+        st.session_state.uploader_generation = 3
+        _clear_attachments()
+        assert st.session_state.batch_items == []
+        assert st.session_state.uploader_generation == 4
+
+
+class TestSealRoutingSummary:
+    def _fn(self):
+        from app.app import _seal_routing_summary
+
+        return _seal_routing_summary
+
+    def test_groups_by_flow_label(self):
+        items = [
+            {"kind": "seal_reseal", "status": "pending", "filename": "a.xlsx"},
+            {"kind": "seal_reseal", "status": "success", "filename": "b.xlsx"},
+        ]
+        assert self._fn()(items) == {"补签派遣员工合同用章申请": ["a.xlsx", "b.xlsx"]}
+
+    def test_error_items_excluded(self):
+        items = [{"kind": "seal_reseal", "status": "error", "filename": "a.xlsx"}]
+        assert self._fn()(items) == {}
+
+    def test_non_seal_excluded(self):
+        items = [{"kind": "bonus", "status": "pending", "filename": "a.xlsx"}]
+        assert self._fn()(items) == {}
+
+    def test_mixed_flows(self):
+        items = [
+            {"kind": "seal_reseal", "status": "pending", "filename": "a.xlsx"},
+            {
+                "kind": "seal_terminate_cert",
+                "status": "pending",
+                "filename": "b.xlsx",
+            },
+        ]
+        assert self._fn()(items) == {
+            "补签派遣员工合同用章申请": ["a.xlsx"],
+            "解除（终止）劳动合同证明书用印申请": ["b.xlsx"],
+        }
+
+
+class TestManualSwitchClearsUploader:
+    """手动切换审批类型：上传控件换代数 +1（等效清空附件）。
+
+    file_uploader key 只读无法直接清空，靠换 key 重建实现；
+    盲传自动切换不改代数（文件保留）。AppTest 走真实 app.py。
+    """
+
+    APP_PATH = Path(__file__).resolve().parent.parent / "app" / "app.py"
+
+    def _login(self, at):
+        at.session_state["logged_in"] = True
+        at.session_state["open_id"] = "ou_test"
+        at.session_state["user_name"] = "测试"
+        at.session_state["name_lookup_failed"] = False
+
+    def test_manual_switch_bumps_generation(self, monkeypatch):
+        from streamlit.testing.v1 import AppTest
+
+        # 置空凭证：.env 已在导入时加载，但 load_dotenv 不覆盖已有环境变量，
+        # 侧边栏走「缺凭证」分支，避免测试发起真实网络请求。
+        monkeypatch.setenv("FEISHU_APP_ID", "")
+        monkeypatch.setenv("FEISHU_APP_SECRET", "")
+
+        at = AppTest.from_file(str(self.APP_PATH), default_timeout=30)
+        at.run()
+        assert not at.exception
+        self._login(at)
+        at.run()
+
+        gen0 = at.session_state["uploader_generation"]
+        at.radio[0].set_value("解除（终止）劳动合同证明书用印申请").run()
+        assert not at.exception
+        assert at.session_state["uploader_generation"] == gen0 + 1
+        assert at.radio[0].value == "解除（终止）劳动合同证明书用印申请"
+
+    def test_switch_rerun_stable_no_crash(self, monkeypatch):
+        from streamlit.testing.v1 import AppTest
+
+        monkeypatch.setenv("FEISHU_APP_ID", "")
+        monkeypatch.setenv("FEISHU_APP_SECRET", "")
+
+        at = AppTest.from_file(str(self.APP_PATH), default_timeout=30)
+        at.run()
+        self._login(at)
+        at.run()
+        at.radio[0].set_value("补签派遣员工合同用章申请").run()
+        at.run()
+        assert not at.exception
+
+
 # ── Option value resolution ──────────────────────────────────────────
 
 class TestResolveSealOptionValue:
