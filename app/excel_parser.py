@@ -1913,6 +1913,45 @@ def _parse_seal_form_excel(
     )
 
 
+def detect_seal_kind(
+    path: str | Path,
+    sheet_name: str | None = None,
+    sheet_index: int | None = None,
+) -> str | None:
+    """按表头列签名识别明细表属于哪个用章/用印流程（盲传自动识别）。
+
+    三个模板的列签名互斥（与列序无关，旧表头 印章类型/签约主体 同样识别）：
+        - 有「身份证复印件盖公章份数」列        → 新签/续签批量
+        - 有「合同开始/结束时间」或「补签原因」列 → 补签
+        - 仅有 姓名+份数+用印主体             → 解除（终止）劳动合同证明书
+    返回 kind 字符串；无法识别返回 None（调用方按所选流程解析，
+    由解析的必需列校验自然报错）。
+    """
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix == ".xls":
+        _title, all_rows = _read_xls(path, sheet_name=sheet_name, sheet_index=sheet_index)
+    elif suffix == ".xlsx":
+        _title, all_rows = _read_xlsx(path, sheet_name=sheet_name, sheet_index=sheet_index)
+    else:
+        return None
+
+    for row in all_rows:
+        candidate: set[str] = set()
+        for cell in row:
+            field_name = _resolve_seal_header(cell)
+            if field_name is not None:
+                candidate.add(field_name)
+        # 表头行特征：三个流程公共的 姓名/份数/单选 列同时出现。
+        if {"name", "copies", "option"} <= candidate:
+            if "id_copies" in candidate:
+                return "seal_contract_batch"
+            if candidate & {"start", "end", "reason"}:
+                return "seal_reseal"
+            return "seal_terminate_cert"
+    return None
+
+
 def parse_seal_reseal_excel(
     path: str | Path,
     sheet_name: str | None = None,

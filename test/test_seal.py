@@ -21,6 +21,7 @@ import openpyxl
 import pytest
 
 from app.excel_parser import (
+    detect_seal_kind,
     parse_seal_contract_batch_excel,
     parse_seal_reseal_excel,
     parse_seal_terminate_cert_excel,
@@ -326,6 +327,55 @@ class TestParseSealContractBatch:
         _make_batch_xlsx(path, entity="海淀分公司")
         with pytest.raises(ValueError, match="用印主体无法识别"):
             parse_seal_contract_batch_excel(path)
+
+
+# ── Blind-upload kind detection ──────────────────────────────────────
+
+class TestDetectSealKind:
+    """盲传识别：按表头列签名判定文件属于哪个流程（三者互斥）。"""
+
+    def test_fixtures_detected(self, reseal_xlsx, term_xlsx, batch_xlsx):
+        assert detect_seal_kind(reseal_xlsx) == "seal_reseal"
+        assert detect_seal_kind(term_xlsx) == "seal_terminate_cert"
+        assert detect_seal_kind(batch_xlsx) == "seal_contract_batch"
+
+    def test_shipped_templates_detected(self):
+        assert detect_seal_kind(RESEAL_TEMPLATE) == "seal_reseal"
+        assert detect_seal_kind(TERM_TEMPLATE) == "seal_terminate_cert"
+        assert detect_seal_kind(BATCH_TEMPLATE) == "seal_contract_batch"
+
+    def test_legacy_headers_detected(self, tmp_path: Path):
+        """旧表头（印章类型/签约主体）同样可识别。"""
+        path = tmp_path / "legacy_term.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["序号", "派遣员工姓名", "证明份数", "印章类型"])
+        ws.append([1, "李四", 4, "彩虹公司公章"])
+        wb.save(path)
+        assert detect_seal_kind(path) == "seal_terminate_cert"
+
+    def test_preamble_row_above_header(self, tmp_path: Path):
+        path = tmp_path / "preamble.xlsx"
+        _make_reseal_xlsx(path, preamble=True)
+        assert detect_seal_kind(path) == "seal_reseal"
+
+    def test_partial_columns_still_detected(self, tmp_path: Path):
+        """识别只需列签名；缺列的文件由解析器按必需列报错。"""
+        path = tmp_path / "partial.xlsx"
+        _make_reseal_xlsx(path, omit="合同结束时间")
+        assert detect_seal_kind(path) == "seal_reseal"
+        with pytest.raises(ValueError, match="未找到表头行"):
+            parse_seal_reseal_excel(path)
+
+    def test_unrecognized_returns_none(self, tmp_path: Path):
+        """无用章特征列（如普通费用表）返回 None。"""
+        path = tmp_path / "other.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["姓名", "金额一", "金额二"])
+        ws.append(["李四", 100, 200])
+        wb.save(path)
+        assert detect_seal_kind(path) is None
 
 
 # ── Option value resolution ──────────────────────────────────────────

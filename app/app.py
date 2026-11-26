@@ -33,6 +33,7 @@ from app.excel_parser import (
     parse_seal_reseal_excel,
     parse_seal_terminate_cert_excel,
     parse_seal_contract_batch_excel,
+    detect_seal_kind,
     list_sheets,
     list_insurance_sheets,
     MealRefundSheet,
@@ -646,8 +647,18 @@ def render_step1_upload():
             tmp_file.close()
 
             try:
+                item_kind = kind
                 if kind in SEAL_KINDS:
-                    sheet = SEAL_KINDS[kind]["parser"](tmp_file.name)
+                    # 用章三流程：按表头列签名识别文件真实归属，盲传
+                    # 传错时自动纠正到正确流程解析、预览与提交。
+                    detected = detect_seal_kind(tmp_file.name)
+                    if detected and detected != kind:
+                        item_kind = detected
+                        st.info(
+                            f"「{uploaded_file.name}」识别为"
+                            f"「{SEAL_KINDS[item_kind]['label']}」，已按该流程解析。"
+                        )
+                    sheet = SEAL_KINDS[item_kind]["parser"](tmp_file.name)
                 elif kind == "bonus":
                     sheet = parse_bonus_excel(tmp_file.name)
                 elif kind == "meal2":
@@ -656,14 +667,14 @@ def render_step1_upload():
                     sheet = parse_insurance_excel(tmp_file.name)
                 else:
                     sheet = parse_meal_refund_excel(tmp_file.name)
-                if kind in SEAL_KINDS:
+                if item_kind in SEAL_KINDS:
                     # 用章流程：默认备注取表头信息区的「备注」单元格。
                     default_remark = sheet.remark
                 else:
                     default_remark = f"制表：{sheet.maker}" if sheet.maker else ""
                 st.session_state.batch_items.append(
                     {
-                        "kind": kind,
+                        "kind": item_kind,
                         "filename": uploaded_file.name,
                         "tmp_path": tmp_file.name,
                         "sheet": sheet,
@@ -681,7 +692,7 @@ def render_step1_upload():
             except Exception as e:
                 st.session_state.batch_items.append(
                     {
-                        "kind": kind,
+                        "kind": item_kind,
                         "filename": uploaded_file.name,
                         "tmp_path": tmp_file.name,
                         "sheet": None,
@@ -717,8 +728,15 @@ def render_step2_preview():
 
         for idx, item in enumerate(items):
             sheet = item["sheet"]
+            # 每个文件按各自的流程渲染（盲传被自动识别纠正时可能与所选类型不同）。
+            item_kind = item.get("kind", kind)
+            flow_tag = (
+                f"（{SEAL_KINDS[item_kind]['label']}）"
+                if item_kind in SEAL_KINDS and item_kind != kind
+                else ""
+            )
             with st.expander(
-                f"{idx + 1}. {item['filename']}"
+                f"{idx + 1}. {item['filename']}{flow_tag}"
                 + ("" if item["status"] != "error" else " ⚠ 解析失败"),
                 expanded=True,
             ):
@@ -726,7 +744,7 @@ def render_step2_preview():
                     st.error(f"解析失败：{item['error']}")
                     continue
 
-                if kind in SEAL_KINDS:
+                if item_kind in SEAL_KINDS:
                     # 用章表单没有标题控件，用「用章事由」替代标题编辑
                     # （解析时按明细自动生成默认值，此处可修改）。
                     reason = st.text_input(
@@ -747,11 +765,11 @@ def render_step2_preview():
 
                 st.markdown("**明细数据：**")
 
-                data = _build_preview_data(kind, sheet)
+                data = _build_preview_data(item_kind, sheet)
                 if data:
                     st.dataframe(data, use_container_width=True, hide_index=True)
 
-                _render_sheet_totals(kind, sheet)
+                _render_sheet_totals(item_kind, sheet)
                 st.markdown(f"**数据行数：** {len(sheet.rows)}")
 
                 if sheet.warnings:
@@ -939,7 +957,7 @@ def render_step4_actions():
         # 用章流程：用章事由为表单必填，提交前逐单校验。
         missing_reason = [
             it for it in pending
-            if kind in SEAL_KINDS and not (it.get("reason") or "").strip()
+            if it.get("kind", kind) in SEAL_KINDS and not (it.get("reason") or "").strip()
         ]
         if missing_reason:
             st.error(
@@ -952,7 +970,13 @@ def render_step4_actions():
         else:
             st.markdown(f"**待提交审批单：** {len(pending)} 个")
             for it in pending:
-                st.caption(f"• {it['filename']}（{len(it['sheet'].rows)} 行数据）")
+                it_kind = it.get("kind", kind)
+                flow_tag = (
+                    f"，{SEAL_KINDS[it_kind]['label']}"
+                    if it_kind in SEAL_KINDS and it_kind != kind
+                    else ""
+                )
+                st.caption(f"• {it['filename']}（{len(it['sheet'].rows)} 行数据{flow_tag}）")
 
         col_submit, _ = st.columns(2)
         with col_submit:
@@ -972,30 +996,35 @@ def render_step4_actions():
                 st.error("无法获取访问令牌")
                 st.session_state.batch_submitting = False
             else:
-                try:
-                    approval_code = get_approval_code(kind, st.session_state.approval_entity)
-                except RuntimeError as e:
-                    st.error(str(e))
-                    st.session_state.batch_submitting = False
-                    return
-                if kind in SEAL_KINDS:
-                    build_widgets = SEAL_KINDS[kind]["form_builder"]
-                elif kind == "bonus":
-                    build_widgets = build_bonus_form_widgets
-                elif kind == "meal2":
-                    build_widgets = build_meal2_form_widgets
-                elif kind == "insurance":
-                    build_widgets = get_insurance_entity(
-                        st.session_state.approval_entity
-                    )["form_builder"]
-                else:
-                    build_widgets = build_form_widgets
-
                 results = []
                 for idx, item in enumerate(items):
                     if item["status"] != "pending":
                         continue
                     sheet = item["sheet"]
+                    # 每单按各自的流程取审批 Code 与构建器（用章流程可能
+                    # 被盲传识别纠正；其余类型与页面所选类型一致）。
+                    item_kind = item.get("kind", kind)
+                    try:
+                        approval_code = get_approval_code(
+                            item_kind, st.session_state.approval_entity
+                        )
+                    except RuntimeError as e:
+                        item["status"] = "error"
+                        item["error"] = str(e)
+                        results.append((item["filename"], None, str(e)))
+                        continue
+                    if item_kind in SEAL_KINDS:
+                        build_widgets = SEAL_KINDS[item_kind]["form_builder"]
+                    elif item_kind == "bonus":
+                        build_widgets = build_bonus_form_widgets
+                    elif item_kind == "meal2":
+                        build_widgets = build_meal2_form_widgets
+                    elif item_kind == "insurance":
+                        build_widgets = get_insurance_entity(
+                            st.session_state.approval_entity
+                        )["form_builder"]
+                    else:
+                        build_widgets = build_form_widgets
                     try:
                         with st.spinner(f"正在提交 {idx + 1}/{len(pending)}：{item['filename']}..."):
                             # 上传附件
