@@ -172,7 +172,7 @@ class TestParseSealReseal:
     def test_auto_reason_and_empty_remark(self, reseal_xlsx: Path):
         """用章事由按明细自动生成；备注留空（界面填写）。"""
         sheet = parse_seal_reseal_excel(reseal_xlsx)
-        assert sheet.reason == "补签派遣员工合同用章（共3人，合同份数合计3份）"
+        assert sheet.reason == "补签派遣员工合同用章，共3人，合同份数合计3份"
         assert sheet.remark == ""
         assert sheet.copies_label == "合同份数"
         assert sheet.option_label == "印章类型"
@@ -438,7 +438,7 @@ class TestShippedSealTemplates:
         assert len(sheet.rows) == 5
         assert sheet.total_copies == 20  # 5 行 × 默认 4 份
         assert all(r.copies == 4 for r in sheet.rows)
-        assert sheet.reason == "补签派遣员工合同用章（共5人，合同份数合计20份）"
+        assert sheet.reason == "补签派遣员工合同用章，共5人，合同份数合计20份"
         assert sheet.remark == ""
         assert sheet.warnings == []
 
@@ -447,7 +447,7 @@ class TestShippedSealTemplates:
         assert len(sheet.rows) == 4
         assert sheet.total_copies == 16  # 4 行 × 默认 4 份
         assert all(r.copies == 4 for r in sheet.rows)
-        assert sheet.reason == "解除（终止）劳动合同证明书用印（共4人，证明份数合计16份）"
+        assert sheet.reason == "解除劳动合同证明书用印，共4人，证明份数合计16份"
         assert sheet.warnings == []
 
     def test_batch_template_parses_cleanly(self):
@@ -455,7 +455,7 @@ class TestShippedSealTemplates:
         assert len(sheet.rows) == 5
         assert sheet.total_copies == 20  # 5 行 × 默认 4 份
         assert all(r.copies == 4 for r in sheet.rows)
-        assert sheet.reason == "新签/续签派遣员工劳动合同批量用章用印（共5人，合同份数合计20份）"
+        assert sheet.reason == "新签/续签派遣员工劳动合同批量用章用印，共5人，合同份数合计20份"
         assert sheet.warnings == []
 
     def test_templates_no_real_pii(self):

@@ -1577,14 +1577,14 @@ def _resolve_seal_header(cell_value: object) -> str | None:
 
 
 def _auto_seal_reason(kind: str, rows: list[SealDetailRow]) -> str:
-    """按明细自动生成用章事由（界面可再修改）。"""
+    """按明细自动生成用章事由（界面可再修改）。不加括号，直接成句。"""
     n = len(rows)
     total = sum(r.copies for r in rows)
     if kind == "seal_reseal":
-        return f"补签派遣员工合同用章（共{n}人，合同份数合计{total}份）"
+        return f"补签派遣员工合同用章，共{n}人，合同份数合计{total}份"
     if kind == "seal_terminate_cert":
-        return f"解除（终止）劳动合同证明书用印（共{n}人，证明份数合计{total}份）"
-    return f"新签/续签派遣员工劳动合同批量用章用印（共{n}人，合同份数合计{total}份）"
+        return f"解除劳动合同证明书用印，共{n}人，证明份数合计{total}份"
+    return f"新签/续签派遣员工劳动合同批量用章用印，共{n}人，合同份数合计{total}份"
 
 
 def _parse_seal_date_cell(value: object, row_no: int, label: str) -> str:
