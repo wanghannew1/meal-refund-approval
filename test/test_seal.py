@@ -23,6 +23,33 @@ from app.excel_parser import (
     parse_seal_reseal_excel,
     parse_seal_terminate_cert_excel,
 )
+
+
+class TestBatchWidgetStateCleanup:
+    """换文件/换类型后，批量编辑控件的 widget 状态必须一并清理。
+
+    否则 Streamlit 按控件 key 保留旧输入，「用章事由（自动生成，
+    可修改）」等输入框会显示上一个文件的编辑值而非新默认值。
+    """
+
+    def test_clear_batch_items_pops_widget_keys(self):
+        import streamlit as st
+
+        from app.app import _clear_batch_items
+
+        st.session_state.batch_items = []
+        st.session_state["batch_reason_0"] = "旧文件的事由"
+        st.session_state["batch_title_1"] = "旧文件的标题"
+        st.session_state["batch_remark_2"] = "旧文件的备注"
+        st.session_state["unrelated_key"] = "keep me"
+
+        _clear_batch_items()
+
+        assert "batch_reason_0" not in st.session_state
+        assert "batch_title_1" not in st.session_state
+        assert "batch_remark_2" not in st.session_state
+        assert st.session_state["unrelated_key"] == "keep me"
+        assert st.session_state.batch_items == []
 from app.form_builder import (
     SEAL_ATTACHMENT,
     SEAL_DETAIL_LIST,

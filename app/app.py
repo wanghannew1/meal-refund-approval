@@ -366,6 +366,14 @@ def _clear_batch_items():
             except Exception:
                 pass
     st.session_state.batch_items = []
+    # 批量编辑控件（审批标题/备注/用章事由）的 widget 状态一并清掉：
+    # Streamlit 按 key 保留输入值，换文件或换审批类型后同序号的控件
+    # 会沿用旧文件的编辑值，覆盖新生成的默认值。
+    for key in list(st.session_state.keys()):
+        if isinstance(key, str) and key.startswith(
+            ("batch_title_", "batch_remark_", "batch_reason_")
+        ):
+            st.session_state.pop(key, None)
 
 
 def _get_token() -> str:
