@@ -1470,6 +1470,511 @@ def parse_insurance_excel(
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# 用章/用印批量申请（3 个流程共用一套解析骨架）
+#
+# - 补签派遣员工合同用章申请（C17A8B67-4C63-4FD8-BACE-D398BEE3C2FE）
+# - 解除（终止）劳动合同证明书用印申请（6B6D7EFF-C1A7-4021-B7D5-2963C01D509C）
+# - 新签/续签派遣员工合同批量用章用印申请（FFF8A3B3-7917-44F1-8B06-3F4B0183A4F8）
+#
+# 三个审批表单均为「表头信息区 + 明细列表」结构，不含标题控件：
+#   顶层：用章事由（必填）、备注（选填）、附件（选填）
+#   明细行：派遣员工姓名 + 各流程专属列（份数/印章类型/合同起止等）
+# Excel 约定：表头行之前的「用章事由：」「备注：」单元格为表头信息区，
+# 明细从表头行开始；序号列可选；每个 Excel 文件对应一个审批实例。
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@dataclass(frozen=True)
+class SealDetailRow:
+    """用章/用印明细表的一行数据。
+
+    Attributes:
+        serial: 序号（预览展示用，审批表单无序号控件）。
+        name: 派遣员工姓名。
+        copies: 合同份数 / 证明份数（number 控件，正整数）。
+        option_text: Excel 中印章类型/签约主体的原始文本（预览展示用）。
+        option_value: 对应审批表单单选控件的选项 value。
+        start_date: 合同开始时间（RFC3339，仅补签流程非空）。
+        end_date: 合同结束时间（RFC3339，仅补签流程非空）。
+        interval_days: 合同期限天数（由起止时间计算，仅补签流程非空）。
+        reason: 补签原因（仅补签流程非空）。
+        id_copy_copies: 身份证复印件盖公章份数（仅新签流程非空，input 控件）。
+    """
+
+    serial: str
+    name: str
+    copies: int
+    option_text: str
+    option_value: str
+    start_date: str = ""
+    end_date: str = ""
+    interval_days: str = ""
+    reason: str = ""
+    id_copy_copies: str = ""
+
+
+@dataclass(frozen=True)
+class SealDetailSheet:
+    """解析后的用章/用印批量申请明细表。
+
+    Attributes:
+        title: Excel 首格文本（仅预览展示；审批表单没有标题控件）。
+        reason: 用章事由（表单必填；为空时由界面在提交前拦截）。
+        remark: 表头信息区的备注（选填）。
+        rows: 明细数据行。
+        copies_label: 份数列名（合同份数 / 证明份数），预览与合计展示用。
+        option_label: 单选列名（印章类型 / 签约主体），预览表头用。
+        total_copies: 明细份数合计。
+        maker: 制表人（扫描「制表：」行）。
+        warnings: 警告信息列表。
+    """
+
+    title: str
+    reason: str
+    remark: str
+    rows: list[SealDetailRow]
+    copies_label: str
+    option_label: str
+    total_copies: int = 0
+    maker: str = ""
+    warnings: list[str] = field(default_factory=list)
+
+
+def _resolve_seal_header(cell_value: object) -> str | None:
+    """用章/用印明细表表头单元格 → 规范字段名（不匹配返回 None）。
+
+    Mapping (first match wins):
+        serial:    序号
+        name:      姓名 / 派遣员工姓名 / 员工姓名
+        id_copies: 同时含「身份证」和「份数」（身份证复印件盖公章份数）
+        copies:    含「份数」（合同份数 / 证明份数）
+        option:    含「印章」或「主体」（印章类型 / 签约主体）
+        start:     含「开始」（合同开始时间）
+        end:       含「结束」（合同结束时间）
+        reason:    含「原因」（补签原因）
+    """
+    if cell_value is None:
+        return None
+    text = str(cell_value).strip()
+    if not text:
+        return None
+    if text == "序号":
+        return "serial"
+    if text in ("姓名", "派遣员工姓名", "员工姓名"):
+        return "name"
+    if "身份证" in text and "份数" in text:
+        return "id_copies"
+    if "份数" in text:
+        return "copies"
+    if "印章" in text or "主体" in text:
+        return "option"
+    if "开始" in text:
+        return "start"
+    if "结束" in text:
+        return "end"
+    if "原因" in text:
+        return "reason"
+    return None
+
+
+def _extract_labeled_value(rows: list[list[object]], label: str) -> str:
+    """在整表中找「label」开头的标签单元格并取其值。
+
+    支持两种写法：值写在同一单元格冒号后（用章事由：xxx），
+    或写在同行右侧第一个非空单元格（用章事由： | xxx）。
+    找不到标签时返回空串。
+    """
+    for row in rows:
+        for i, cell in enumerate(row):
+            text = str(cell).strip() if cell is not None else ""
+            if not text.startswith(label):
+                continue
+            rest = text[len(label):].lstrip("：:　 ").strip()
+            if rest:
+                return rest
+            for nxt in row[i + 1:]:
+                nxt_text = str(nxt).strip() if nxt is not None else ""
+                if nxt_text:
+                    return nxt_text
+            return ""
+    return ""
+
+
+def _parse_seal_date_cell(value: object, row_no: int, label: str) -> str:
+    """把合同起止日期单元格解析为 RFC3339（+08:00 零点）字符串。
+
+    支持 datetime/date（openpyxl）、xlrd 日期序列值（float）、
+    以及 2025-01-01 / 2025/1/1 / 2025.1.1 / 2025年1月1日 等文本。
+    解析失败抛 ValueError（带行号与列名）。
+    """
+    import datetime as _dt
+
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise ValueError(f"第{row_no}行{label}为空")
+
+    if isinstance(value, _dt.datetime):
+        dt = value
+    elif isinstance(value, _dt.date):
+        dt = _dt.datetime(value.year, value.month, value.day)
+    elif isinstance(value, (int, float)):
+        # xlrd 日期单元格为 1900 系列表值
+        try:
+            import xlrd
+
+            dt = xlrd.xldate_as_datetime(value, 0)
+        except Exception:
+            raise ValueError(f"第{row_no}行{label}无法识别日期：{value}") from None
+    else:
+        text = re.sub(r"[\s年月日/.]", "-", str(value).strip())
+        text = re.sub(r"-+", "-", text).strip("-")
+        parts = text.split("-")
+        if len(parts) != 3:
+            raise ValueError(f"第{row_no}行{label}无法识别日期：{value}")
+        try:
+            y, m, d = (int(p) for p in parts)
+            dt = _dt.datetime(y, m, d)
+        except ValueError:
+            raise ValueError(f"第{row_no}行{label}日期无效：{value}") from None
+
+    return dt.strftime("%Y-%m-%dT00:00:00+08:00")
+
+
+def _parse_seal_copies(value: object, row_no: int, label: str) -> int:
+    """把份数单元格解析为正整数（number 控件要求 ≥1）。"""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise ValueError(f"第{row_no}行{label}为空")
+    text = str(value).strip().replace("份", "")
+    try:
+        copies = Decimal(text)
+    except InvalidOperation:
+        raise ValueError(f"第{row_no}行{label}不是数字：{value}") from None
+    if copies != copies.to_integral_value() or copies < 1:
+        raise ValueError(f"第{row_no}行{label}需为不小于1的整数：{value}")
+    return int(copies)
+
+
+@dataclass(frozen=True)
+class _SealParseSpec:
+    """单个用章/用印流程的解析规格。"""
+
+    copies_label: str      # 合同份数 / 证明份数
+    option_label: str      # 印章类型 / 签约主体
+    required: frozenset    # 表头必须出现的规范字段
+    has_dates: bool        # 是否解析合同起止时间（补签流程）
+    has_reason: bool       # 是否解析补签原因列（补签流程）
+    has_id_copies: bool    # 是否解析身份证复印件盖公章份数列（新签流程）
+
+
+_SEAL_SPECS: dict[str, _SealParseSpec] = {
+    "seal_reseal": _SealParseSpec(
+        copies_label="合同份数",
+        option_label="印章类型",
+        required=frozenset({"name", "start", "end", "copies", "option", "reason"}),
+        has_dates=True,
+        has_reason=True,
+        has_id_copies=False,
+    ),
+    "seal_terminate_cert": _SealParseSpec(
+        copies_label="证明份数",
+        option_label="印章类型",
+        required=frozenset({"name", "copies", "option"}),
+        has_dates=False,
+        has_reason=False,
+        has_id_copies=False,
+    ),
+    "seal_contract_batch": _SealParseSpec(
+        copies_label="合同份数",
+        option_label="签约主体",
+        required=frozenset({"name", "copies", "option", "id_copies"}),
+        has_dates=False,
+        has_reason=False,
+        has_id_copies=True,
+    ),
+}
+
+_SEAL_KIND_LABELS = {
+    "seal_reseal": "补签派遣员工合同用章申请",
+    "seal_terminate_cert": "解除（终止）劳动合同证明书用印申请",
+    "seal_contract_batch": "新签/续签派遣员工合同批量用章用印申请",
+}
+
+
+def _parse_seal_form_excel(
+    path: str | Path,
+    kind: str,
+    sheet_name: str | None = None,
+    sheet_index: int | None = None,
+) -> SealDetailSheet:
+    """解析用章/用印批量申请明细表（三个流程共用骨架）。
+
+    表头按列名识别（列序随意、序号列可选）；「用章事由」「备注」从
+    表头信息区提取；印章类型/签约主体文本实时校验为表单选项 value；
+    补签流程自动按合同起止时间计算期限天数。
+    """
+    # form_builder 依赖本模块，函数内延迟导入避免循环依赖。
+    from app.form_builder import resolve_seal_option_value
+
+    spec = _SEAL_SPECS[kind]
+
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix == ".xls":
+        title, all_rows = _read_xls(path, sheet_name=sheet_name, sheet_index=sheet_index)
+    elif suffix == ".xlsx":
+        title, all_rows = _read_xlsx(path, sheet_name=sheet_name, sheet_index=sheet_index)
+    else:
+        raise ValueError(f"不支持的文件格式: {suffix}，仅支持 .xls 和 .xlsx")
+
+    # 表头信息区：用章事由（必填）、备注（选填）
+    reason = _extract_labeled_value(all_rows, "用章事由")
+    remark = _extract_labeled_value(all_rows, "备注")
+
+    # 定位表头行
+    header_row_idx: int | None = None
+    col_map: dict[str, int] = {}
+    for idx, row in enumerate(all_rows):
+        candidate: dict[str, int] = {}
+        for col_idx, cell in enumerate(row):
+            field_name = _resolve_seal_header(cell)
+            if field_name is not None and field_name not in candidate:
+                candidate[field_name] = col_idx
+        if spec.required.issubset(candidate):
+            header_row_idx = idx
+            col_map = candidate
+            break
+
+    if header_row_idx is None:
+        raise ValueError(
+            f"未找到表头行（{_SEAL_KIND_LABELS[kind]}需要包含："
+            "、".join(sorted(spec.required - {"serial"})) + " 等列）"
+        )
+
+    def _col(field_name: str) -> int | None:
+        return col_map.get(field_name)
+
+    idx_serial = _col("serial")
+    idx_name = col_map["name"]
+    idx_copies = col_map["copies"]
+    idx_option = col_map["option"]
+    idx_start = _col("start")
+    idx_end = _col("end")
+    idx_reason = _col("reason")
+    idx_id_copies = _col("id_copies")
+
+    needed = [idx_name, idx_copies, idx_option]
+    for c in (idx_serial, idx_start, idx_end, idx_reason, idx_id_copies):
+        if c is not None:
+            needed.append(c)
+    max_needed = max(needed)
+
+    rows: list[SealDetailRow] = []
+    warnings: list[str] = []
+    row_errors: list[str] = []
+    skipped_blank_rows: list[int] = []
+    name_counts: dict[str, int] = {}
+    total_copies = 0
+    copies_total_cell = ""
+    maker = ""
+    last_data_row_idx: int | None = None
+
+    for idx in range(header_row_idx + 1, len(all_rows)):
+        row = all_rows[idx]
+        while len(row) <= max_needed:
+            row.append(None)
+
+        guard_raw = row[idx_serial if idx_serial is not None else idx_name]
+        guard_str = str(guard_raw).strip() if guard_raw is not None else ""
+
+        # 合计 / 总计 行：份数合计校验后终止解析
+        if guard_str in ("总计", "合计"):
+            raw = row[idx_copies]
+            copies_total_cell = str(raw).strip() if raw is not None else ""
+            break
+
+        if "签字" in guard_str or "制表" in guard_str:
+            break
+
+        if _is_blank_row(row):
+            skipped_blank_rows.append(idx)
+            continue
+
+        name = str(row[idx_name]).strip() if row[idx_name] is not None else ""
+        if not name:
+            skipped_blank_rows.append(idx)
+            continue
+
+        row_no = idx + 1
+        serial_str, _ = (
+            _normalize_numeric(row[idx_serial]) if idx_serial is not None else ("", False)
+        )
+
+        try:
+            copies = _parse_seal_copies(row[idx_copies], row_no, spec.copies_label)
+            option_text = (
+                str(row[idx_option]).strip() if row[idx_option] is not None else ""
+            )
+            if not option_text:
+                raise ValueError(f"第{row_no}行{spec.option_label}为空")
+            option_value = resolve_seal_option_value(option_text, spec.option_label)
+
+            start_date = end_date = interval_days = ""
+            if spec.has_dates:
+                start_date = _parse_seal_date_cell(
+                    row[idx_start], row_no, "合同开始时间"
+                )
+                end_date = _parse_seal_date_cell(row[idx_end], row_no, "合同结束时间")
+                import datetime as _dt
+
+                start_dt = _dt.datetime.strptime(start_date[:10], "%Y-%m-%d")
+                end_dt = _dt.datetime.strptime(end_date[:10], "%Y-%m-%d")
+                days = (end_dt - start_dt).days
+                if days <= 0:
+                    raise ValueError(
+                        f"第{row_no}行合同结束时间需晚于合同开始时间"
+                    )
+                interval_days = str(days)
+
+            row_reason = ""
+            if spec.has_reason:
+                row_reason = (
+                    str(row[idx_reason]).strip() if row[idx_reason] is not None else ""
+                )
+                if not row_reason:
+                    raise ValueError(f"第{row_no}行补签原因为空")
+
+            id_copy_copies = ""
+            if spec.has_id_copies:
+                id_copy_copies = (
+                    str(row[idx_id_copies]).strip()
+                    if row[idx_id_copies] is not None
+                    else ""
+                )
+                if not id_copy_copies:
+                    raise ValueError(f"第{row_no}行身份证复印件盖公章份数为空")
+                if not any(ch.isdigit() for ch in id_copy_copies):
+                    warnings.append(
+                        f"第{row_no}行身份证复印件盖公章份数不含数字：{id_copy_copies}"
+                    )
+        except ValueError as e:
+            row_errors.append(str(e))
+            continue
+
+        name_counts[name] = name_counts.get(name, 0) + 1
+        total_copies += copies
+        last_data_row_idx = idx
+        rows.append(
+            SealDetailRow(
+                serial=serial_str,
+                name=name,
+                copies=copies,
+                option_text=option_text,
+                option_value=option_value,
+                start_date=start_date,
+                end_date=end_date,
+                interval_days=interval_days,
+                reason=row_reason,
+                id_copy_copies=id_copy_copies,
+            )
+        )
+
+    # 制表人扫描：全表任意「制表：」单元格（新模板通常在表格末尾）
+    for row in all_rows[header_row_idx + 1:]:
+        for cell in row:
+            cell_text = str(cell).strip() if cell is not None else ""
+            if "制表" in cell_text:
+                maker = _extract_maker(cell_text)
+                break
+        if maker:
+            break
+
+    if not rows:
+        if row_errors:
+            raise ValueError("；".join(row_errors[:5]))
+        raise ValueError("未找到数据行")
+
+    # 用章申请不允许静默丢行：任何一行无法解析都直接拒绝整个文件，
+    # 避免漏盖某位员工的合同章。
+    if row_errors:
+        raise ValueError("；".join(row_errors[:8]))
+
+    if not reason:
+        warnings.append("缺少用章事由（表单必填，请在表格或界面中补充）")
+
+    # 仅提示夹在数据行之间的空行/缺姓名行（表格末尾的空行为排版噪音）。
+    if last_data_row_idx is not None:
+        interleaved_skips = [
+            i for i in skipped_blank_rows if i < last_data_row_idx
+        ]
+        if interleaved_skips:
+            warnings.append(f"跳过 {len(interleaved_skips)} 行（空行/缺姓名）")
+
+    dup_names = {n: c for n, c in name_counts.items() if c > 1}
+    if dup_names:
+        dup_parts = [f"{n}({c}次)" for n, c in sorted(dup_names.items())]
+        warnings.append(f"存在重复姓名: {', '.join(dup_parts)}（各行独立保留）")
+
+    if copies_total_cell:
+        try:
+            expected = Decimal(_extract_total_amount(copies_total_cell))
+            if Decimal(total_copies) != expected:
+                warnings.append(
+                    f"{spec.copies_label}明细合计 ({total_copies}) 与表格合计 ({expected}) 不一致"
+                )
+        except InvalidOperation:
+            pass
+
+    return SealDetailSheet(
+        title=title,
+        reason=reason,
+        remark=remark,
+        rows=rows,
+        copies_label=spec.copies_label,
+        option_label=spec.option_label,
+        total_copies=total_copies,
+        maker=maker,
+        warnings=warnings,
+    )
+
+
+def parse_seal_reseal_excel(
+    path: str | Path,
+    sheet_name: str | None = None,
+    sheet_index: int | None = None,
+) -> SealDetailSheet:
+    """解析补签派遣员工合同用章申请明细表。
+
+    必需列：派遣员工姓名、合同开始时间、合同结束时间、印章类型、
+    补签原因、合同份数；序号列可选。合同期限天数由起止时间自动计算。
+    """
+    return _parse_seal_form_excel(path, "seal_reseal", sheet_name, sheet_index)
+
+
+def parse_seal_terminate_cert_excel(
+    path: str | Path,
+    sheet_name: str | None = None,
+    sheet_index: int | None = None,
+) -> SealDetailSheet:
+    """解析解除（终止）劳动合同证明书用印申请明细表。
+
+    必需列：派遣员工姓名、证明份数、印章类型；序号列可选。
+    """
+    return _parse_seal_form_excel(path, "seal_terminate_cert", sheet_name, sheet_index)
+
+
+def parse_seal_contract_batch_excel(
+    path: str | Path,
+    sheet_name: str | None = None,
+    sheet_index: int | None = None,
+) -> SealDetailSheet:
+    """解析新签/续签派遣员工合同批量用章用印申请明细表。
+
+    必需列：派遣员工姓名、签约主体、合同份数、身份证复印件盖公章份数；
+    序号列可选。
+    """
+    return _parse_seal_form_excel(path, "seal_contract_batch", sheet_name, sheet_index)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # 两列金额明细表（派遣员工简易费用明细表审批-两列金额）
 #
 # 新审批流程专用解析器，与在用的 parse_meal_refund_excel 完全独立。
