@@ -584,11 +584,14 @@ def render_step1_upload():
         else:
             st.warning("模板文件缺失")
 
-        st.caption("模板已脱敏（不含真实个人信息）；请保留表头与合计行结构后填写。")
-        st.caption("返餐费末行写『总计』，工会会费末行写『合计』；工会会费多出的合计列可忽略。")
+        st.caption("模板已脱敏（不含真实个人信息）。")
+        # 以下说明随所属审批类型一起显示，隐藏的工具不再展示旧文案。
+        if MEAL_KIND_ENABLED:
+            st.caption("返餐费/工会会费：请保留表头与合计行结构；返餐费末行写『总计』，工会会费末行写『合计』，工会会费多出的合计列可忽略。")
+        if MEAL2_KIND_ENABLED:
+            st.caption("两列金额：表头需含 姓名 和至少一个金额列；序号、身份证号、第二金额列可省略，单金额列表也可上传。末行合计行可选，有则自动校验。")
         if INSURANCE_KIND_ENABLED:
             st.caption("五险一金请使用对应的分单位模板（医保/社保/工伤/公积金），每月一个 sheet 或一个文件均可。")
-        st.caption("两列金额：表头需含 姓名 和至少一个金额列；序号、身份证号、第二金额列可省略，单金额列表也可上传。末行合计行可选，有则自动校验。")
         if st.session_state.approval_kind in SEAL_KINDS:
             meta = SEAL_KINDS[st.session_state.approval_kind]
             st.caption(
@@ -596,7 +599,7 @@ def render_step1_upload():
                 f"{meta['option_label']}需填写：{'、'.join(seal_option_labels(meta['option_label']))}；"
                 "合同/证明份数默认 4 份，可按需修改。"
             )
-            st.caption("用章事由提交时按明细自动生成（人数、份数），步骤 2 中可修改；备注也在步骤 2 填写。")
+            st.caption("用章事由提交时按明细自动生成（人数、份数），步骤 2 中可修改；备注在步骤 3 填写。")
             if st.session_state.approval_kind == "seal_reseal":
                 st.caption("补签合同：合同开始/结束时间填写日期（如 2026-01-01），期限天数自动计算；每行需填写补签原因。")
             if st.session_state.approval_kind == "seal_contract_batch":
